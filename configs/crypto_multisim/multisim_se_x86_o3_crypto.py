@@ -15,11 +15,11 @@ from m5.objects import (
     BOPPrefetcher,
     BranchPredictor,
     Cache,
-    IQUnit,
     IndirectMemoryPrefetcher,
-    # IMPv2Prefetcher,
+    IMPv2Prefetcher,
     L2XBar,
     LTAGE,
+    LTAGE_TAGE,
     STeMSPrefetcher,
     StridePrefetcher,
     SystemXBar,
@@ -51,8 +51,8 @@ SRC_ROOT   = GEM5_ROOT.parent
 # Flip booleans to quickly include/exclude a benchmark.
 ENABLED_BENCHMARKS = {
     "chacha20":   True,
-    "kyber512":   False, 
-    "sha256":     False,
+    "kyber512":   True, 
+    "sha256":     True,
     "curve25519": True,
 }
 
@@ -109,7 +109,7 @@ L2_CONFIG  = {"size": "1024KiB", "assoc": 16, "latency": 14}  # rounded from 128
 L3_CONFIG  = {"size": "32MiB",   "assoc": 16, "latency": 40}  # rounded from 30MiB
 
 # Set PREFETCHER_TYPE = None to disable; options: "indirect", "IMPv2", "stride", "tagged", "ampm", "bop", "stems".
-PREFETCHER_TYPE   = None
+PREFETCHER_TYPE   = "IMPv2"
 PREFETCHER_LEVELS = {"l1i": False, "l1d": True, "l2": True, "l3": False}
 
 
@@ -118,7 +118,7 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
 
     _PREFETCHER_CLASSES = {
         "indirect": IndirectMemoryPrefetcher,
-        # "IMPv2":  IMPv2Prefetcher,
+        "IMPv2":  IMPv2Prefetcher,
         "stride": StridePrefetcher,
         "tagged": TaggedPrefetcher,
         "ampm":   AMPMPrefetcher,
@@ -269,16 +269,6 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
             cpu.connect_interrupt(self.membus.mem_side_ports, self.membus.cpu_side_ports)
 
 
-# --- Branch Predictor setup ---
-def _create_ltage_branch_predictor() -> BranchPredictor:
-    ltage = LTAGE()
-    if LTAGE_LOG_TAG_TABLE_SIZE is not None:
-        ltage.tage.logTagTableSizes = [
-            int(LTAGE_LOG_TAG_TABLE_SIZE)
-        ] * len(ltage.tage.logTagTableSizes)
-    return BranchPredictor(conditionalBranchPred=ltage)
-
-
 def _create_x86_o3_cpu(cpu_id: int = 0) -> X86O3CPU:
     cpu = X86O3CPU(cpu_id=cpu_id)
 
@@ -293,11 +283,16 @@ def _create_x86_o3_cpu(cpu_id: int = 0) -> X86O3CPU:
     cpu.LQEntries               = LOAD_QUEUE_ENTRIES
     cpu.SQEntries               = STORE_QUEUE_ENTRIES
     cpu.numROBEntries           = ROB_ENTRIES
-    cpu.instQueues              = [IQUnit(numEntries=IQ_ENTRIES)]
+    cpu.instQueues[0].numEntries = IQ_ENTRIES
     cpu.numPhysIntRegs          = PHYS_INT_REGS
     cpu.numPhysFloatRegs        = PHYS_FLOAT_REGS
 
-    cpu.branchPred = _create_ltage_branch_predictor()
+    if LTAGE_LOG_TAG_TABLE_SIZE is None:
+        cpu.branchPred = BranchPredictor(conditionalBranchPred=LTAGE())
+    else:
+        tage = LTAGE_TAGE()
+        tage.logTagTableSizes = [int(LTAGE_LOG_TAG_TABLE_SIZE)] * len(tage.logTagTableSizes)
+        cpu.branchPred = BranchPredictor(conditionalBranchPred=LTAGE(tage=tage))
 
     return cpu
 
