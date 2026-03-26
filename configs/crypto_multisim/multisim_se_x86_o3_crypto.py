@@ -20,7 +20,6 @@ from m5.objects import (
     # IMPv2Prefetcher,
     L2XBar,
     LTAGE,
-    LTAGE_TAGE,
     STeMSPrefetcher,
     StridePrefetcher,
     SystemXBar,
