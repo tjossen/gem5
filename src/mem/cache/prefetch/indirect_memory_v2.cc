@@ -18,6 +18,9 @@
 
 #include "mem/cache/prefetch/indirect_memory_v2.hh"
 
+#include "base/trace.hh"
+#include "debug/HWPrefetch.hh"
+
 namespace gem5
 {
 
@@ -138,7 +141,8 @@ namespace gem5
         {
             // Iterate over all entries and update the confidence
             for (auto& [ip, entry]: indirect_table) {
-                if (*entry.predicted_indirect_access == addr) {
+            if (entry.predicted_indirect_access &&
+                *entry.predicted_indirect_access == addr) {
                     IMPv2Internals::saturating_increment(entry.confidence,
                             indirect_threshold);
                     entry.found_match = true;
@@ -162,6 +166,10 @@ namespace gem5
             entry.confidence = 1;
             entry.predicted_indirect_access.reset();
             entry.found_match = false;
+
+            DPRINTF(HWPrefetch,
+                "IMPv2 learn: pc=%#x base=%#x shift=%d confidence=%d\n",
+                IP, base_addr, shift, entry.confidence);
         }
 
         std::optional<Addr> IMPv2Internals::IndirectTable::
@@ -447,6 +455,9 @@ namespace gem5
                 if (delta) {
                     // Get the address of the first streaming prefetch
                     Addr streaming_pf = pfi.getAddr();
+                    DPRINTF(HWPrefetch,
+                        "IMPv2 stream detected: pc=%#x addr=%#x delta=%#x\n",
+                        pfi.getPC(), pfi.getAddr(), *delta);
                     std::optional<Addr> distance = prefetch_table.
                         getIndirectTable().
                         getIndirectPrefetchDistance(pfi.getPC());
@@ -467,6 +478,9 @@ namespace gem5
                         else {
                             streaming_pf += *delta;
                             pf_candidates.push_back(streaming_pf);
+                            DPRINTF(HWPrefetch,
+                                "IMPv2 stream pf: pc=%#x pf_addr=%#x\n",
+                                pfi.getPC(), streaming_pf);
 
                             /*
                              * Store the necessary metadata to required to
@@ -484,8 +498,14 @@ namespace gem5
 
                             // Only store the metadata once for each cache line
                             if (index_blkaddr_to_metadata.find(key) ==
-                                    index_blkaddr_to_metadata.end())
+                                    index_blkaddr_to_metadata.end()) {
                                 index_blkaddr_to_metadata[key] = value;
+                                DPRINTF(HWPrefetch,
+                                    "IMPv2 deferred ctx: blk=%#x pc=%#x size=%d "
+                                    "prefetch_addr=%#x\n",
+                                    key, value.IP, value.size,
+                                    value.prefetch_address);
+                            }
                         }
                     }
                 }
@@ -530,6 +550,10 @@ namespace gem5
                 }
                 if (index_value) {
                     IMPv2Stats.ipd_updates++;
+                    DPRINTF(HWPrefetch,
+                        "IMPv2 index access: pc=%#x addr=%#x idx=%d size=%d\n",
+                        pfi.getPC(), pfi.getAddr(), *index_value,
+                        pfi.getSize());
 
                     /*
                      * Update the IPD state by providing the index value
@@ -555,6 +579,11 @@ namespace gem5
                  * index, rather it would correspond to the current index
                  * (which was NOT read from the pfi)
                  */
+                DPRINTF(HWPrefetch,
+                    "IMPv2 index access missing data: pc=%#x addr=%#x "
+                    "size=%d\n",
+                    pfi.hasPC() ? pfi.getPC() : 0, pfi.getAddr(),
+                    pfi.getSize());
                 ipd.discardIndex();
             }
         }
@@ -581,6 +610,9 @@ namespace gem5
                         *indirect_parameters;
                     prefetch_table.getIndirectTable().setBaseAddrAndShift(
                             IP, base_addr, shift);
+                    DPRINTF(HWPrefetch,
+                        "IMPv2 IPD match: pc=%#x miss=%#x base=%#x shift=%d\n",
+                        IP, pfi.getAddr(), base_addr, shift);
                 }
             }
         }
@@ -639,6 +671,10 @@ namespace gem5
              * generate indirect prefetch candidates
              */
             if (!pfi.hasPC() || !pfi.hasData()) {
+                DPRINTF(HWPrefetch,
+                    "IMPv2 skip indirect candidate: hasPC=%d hasData=%d "
+                    "addr=%#x\n",
+                    pfi.hasPC(), pfi.hasData(), pfi.getAddr());
                 return std::nullopt;
             }
 
@@ -670,6 +706,11 @@ namespace gem5
                 return prefetch_table.getIndirectTable().
                     getPrefetchCandidate(IP, *index_value);
             }
+
+            DPRINTF(HWPrefetch,
+                "IMPv2 skip indirect candidate: unsupported index size=%d "
+                "pc=%#x addr=%#x\n",
+                pfi.getSize(), pfi.getPC(), pfi.getAddr());
 
             /*
              * If we reach this point, then it means that IMP was not able to
@@ -708,6 +749,10 @@ namespace gem5
             if (indirect_pf_candidate) {
                 addresses.push_back({*indirect_pf_candidate, 0});
                 IMPv2Stats.indirect_prefetches++;
+                DPRINTF(HWPrefetch,
+                    "IMPv2 direct indirect pf: pc=%#x access=%#x pf=%#x\n",
+                    pfi.hasPC() ? pfi.getPC() : 0, pfi.getAddr(),
+                    *indirect_pf_candidate);
             }
 
             /*
@@ -720,6 +765,9 @@ namespace gem5
                 addresses.push_back({addr, 0});
                 IMPv2Stats.indirect_prefetches++;
                 IMPv2Stats.deferred_indirect_prefetches++;
+                DPRINTF(HWPrefetch,
+                    "IMPv2 deferred indirect pf: access=%#x pf=%#x\n",
+                    pfi.getAddr(), addr);
             }
             pending_prefetches.clear();
 
@@ -749,6 +797,12 @@ namespace gem5
             const deferred_prefetch_metadata metadata =
                 index_blkaddr_to_metadata.at(request_blockaddr);
             index_blkaddr_to_metadata.erase(request_blockaddr);
+
+            DPRINTF(HWPrefetch,
+                "IMPv2 notifyFill deferred ctx hit: blk=%#x pc=%#x "
+                "size=%d prefetch_addr=%#x\n",
+                request_blockaddr, metadata.IP, metadata.size,
+                metadata.prefetch_address);
 
             /*
              * Check if the data, i.e the index value, is available. If it is,
@@ -813,13 +867,23 @@ namespace gem5
                          * to calculatePrefetch, the indirect prefetch can be
                          * issued
                          */
-                        if (pf_candidate)
+                        if (pf_candidate) {
                             pending_prefetches.push_back(*pf_candidate);
+                            DPRINTF(HWPrefetch,
+                                "IMPv2 notifyFill index->pf: pc=%#x idx=%d "
+                                "pf=%#x\n",
+                                metadata.IP, *index, *pf_candidate);
+                        }
                     }
 
                     // Move the data pointer forward to the next index position
                     data_ptr += metadata.size;
                 }
+            }
+            else {
+                DPRINTF(HWPrefetch,
+                    "IMPv2 notifyFill missing data: blk=%#x hasData=%d\n",
+                    request_blockaddr, pkt->hasData());
             }
         }
 
