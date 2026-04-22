@@ -20,6 +20,7 @@
 
 #include "base/trace.hh"
 #include "debug/HWPrefetch.hh"
+#include "debug/LightPrefetch.hh"
 
 namespace gem5
 {
@@ -200,7 +201,10 @@ namespace gem5
                 return std::nullopt;
             }
 
-            return {entry.base_address + (index << entry.shift)};
+            const Addr offset = entry.shift > 0 ?
+                (index << entry.shift) :
+                (index >> (-entry.shift));
+            return {entry.base_address + offset};
         }
 
         std::optional<Addr> IMPv2Internals::IndirectTable::
@@ -326,18 +330,34 @@ namespace gem5
             }
             IPDEntry& entry = IPD_table.at(IPD_table_idx);
 
+            DPRINTF(HWPrefetch,
+                "IMPv2 ipd recordMiss pre: pc=%#x miss=%#x idx1_valid=%d "
+                "idx2_valid=%d misses=%zu found=%d cand_sets=%zu\n",
+                *active_IP, miss_addr, entry.index1.has_value(),
+                entry.index2.has_value(), entry.recorded_misses,
+                entry.found_params, entry.base_address_candidates.size());
+
             // Do nothing if there are no more misses left to record
             if (entry.recorded_misses >= num_miss_after_index) {
+                DPRINTF(HWPrefetch,
+                    "IMPv2 ipd recordMiss skip: pc=%#x miss=%#x reason=max_misses\n",
+                    *active_IP, miss_addr);
                 return std::nullopt;
             }
 
             // Do nothing if the indirect pattern was already found
             if (entry.found_params) {
+                DPRINTF(HWPrefetch,
+                    "IMPv2 ipd recordMiss skip: pc=%#x miss=%#x reason=already_found\n",
+                    *active_IP, miss_addr);
                 return std::nullopt;
             }
 
             // Do nothing if index1 is not set yet
             if (!entry.index1) {
+                DPRINTF(HWPrefetch,
+                    "IMPv2 ipd recordMiss skip: pc=%#x miss=%#x reason=no_idx1\n",
+                    *active_IP, miss_addr);
                 return std::nullopt;
             }
 
@@ -551,6 +571,10 @@ namespace gem5
                 if (index_value) {
                     IMPv2Stats.ipd_updates++;
                     DPRINTF(HWPrefetch,
+                        "IMPv2 index access: pc=%#x addr=%#x idx=%d size=%d\n",
+                        pfi.getPC(), pfi.getAddr(), *index_value,
+                        pfi.getSize());
+                    DPRINTF(LightPrefetch,
                         "IMPv2 index access: pc=%#x addr=%#x idx=%d size=%d\n",
                         pfi.getPC(), pfi.getAddr(), *index_value,
                         pfi.getSize());

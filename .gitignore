@@ -38,3 +38,6 @@ configs/dram/lowp_sweep.cfg
 .vscode
 typings
 .DS_Store
+pandora_imp/pandora_imp_poc
+pandora_imp/pandora_imp_poc.s
+pandora_imp/out
