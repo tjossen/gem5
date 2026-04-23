@@ -3,10 +3,13 @@
 # MultiSim SE benchmark runner for crypto workloads with a custom x86 O3 core.
 #
 # Run from the gem5 root directory:
-#   build/X86/gem5.opt -m gem5.utils.multisim \
-#       configs/crypto_multisim/multisim_se_x86_o3_crypto.py
+#   build/X86/gem5.opt -m gem5.utils.multisim configs/crypto_multisim/multisim_se_x86_o3_crypto.py
 
+import csv
+import fcntl
+import os
 from pathlib import Path
+import time
 
 import gem5.utils.multisim as multisim
 from m5.objects import (
@@ -45,13 +48,14 @@ from gem5.utils.override import overrides
 SCRIPT_DIR = Path(__file__).resolve().parent
 GEM5_ROOT  = SCRIPT_DIR.parent.parent
 SRC_ROOT   = GEM5_ROOT.parent
+M5OUT_ROOT = GEM5_ROOT / "m5out"
 
 
 # --- Benchmark setup ---
 # Flip booleans to quickly include/exclude a benchmark.
 ENABLED_BENCHMARKS = {
     "chacha20":   True,
-    "kyber512":   True, 
+    "kyber768":   True, 
     "sha256":     True,
     "curve25519": True,
 }
@@ -61,13 +65,11 @@ BENCHMARK_PATH_CANDIDATES = {
     "chacha20": [
         "crypto-programs/test_openssl/chacha20/test_ossl_chacha20_baseline",
     ],
-    # Preferred Kyber512 paths first; current tree may only have 768 baseline
-    # prebuilt. Disable kyber512 above or point to your own binary.
-    "kyber512": [
-        "crypto-programs/kyber/ref/test/test_kyber512",
-        "crypto-programs/kyber/avx2/test/test_kyber512",
+    # Preferred Kyber768 paths first; current tree may only have 768 baseline
+    # prebuilt. Disable kyber768 above or point to your own binary.
+    "kyber768": [
         "crypto-programs/kyber/ref/test_kyber768_baseline",
-        "crypto-programs/kyber/avx2/test_kyber768_baseline",
+        # "crypto-programs/kyber/avx2/test_kyber768_baseline",
     ],
     "sha256": [
         "crypto-programs/test_openssl/sha256/test_ossl_sha256_baseline",
@@ -79,12 +81,12 @@ BENCHMARK_PATH_CANDIDATES = {
 
 BENCHMARK_ARGUMENTS = {
     "chacha20":   [],
-    "kyber512":   [],
+    "kyber768":   [],
     "sha256":     [],
     "curve25519": [],
 }
 
-MAX_PARALLEL_SIMULATIONS = 4
+MAX_PARALLEL_SIMULATIONS = 16
 
 
 # --- Architecture setup ---
@@ -108,9 +110,30 @@ L1I_CONFIG = {"size": "32KiB",   "assoc": 8,  "latency": 5}
 L2_CONFIG  = {"size": "1024KiB", "assoc": 16, "latency": 14}  # rounded from 1280KiB
 L3_CONFIG  = {"size": "32MiB",   "assoc": 16, "latency": 40}  # rounded from 30MiB
 
-# Set PREFETCHER_TYPE = None to disable; options: "indirect", "IMPv2", "stride", "tagged", "ampm", "bop", "stems".
-PREFETCHER_TYPE   = "IMPv2"
-PREFETCHER_LEVELS = {"l1i": False, "l1d": True, "l2": True, "l3": False}
+PREFETCHER_TYPES = [None, "indirect", "IMPv2", "stride", "tagged", "ampm", "bop", "stems"]
+PREFETCHER_LEVELS = ("l1i", "l1d", "l2", "l3")
+# Manually choose which cache-level combinations to sweep.
+# Each entry enables prefetcher variation only on those levels.
+# Levels not listed in an entry are fixed to None for that entry.
+# Example:
+# LEVEL_COMBINATIONS_TO_TEST = [
+#     ("l1d",),
+#     ("l2",),
+#     ("l1d", "l2"),
+#     ("l1i", "l1d", "l2", "l3"),
+# ]
+LEVEL_COMBINATIONS_TO_TEST = [
+    ("l1i",),
+    ("l1d",),
+    ("l2",),
+    ("l3",),
+    ("l1d", "l2"),
+    ("l1d", "l3"),
+    ("l2", "l3"),
+    ("l1d", "l2", "l3"),
+    ("l1i", "l1d", "l2", "l3"),  # all levels
+]
+SUMMARY_CSV_NAME = "crypto_prefetcher_sweep.csv"
 
 
 class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
@@ -128,6 +151,7 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
 
     def __init__(
         self,
+        prefetcher_map: dict[str, str | None],
         l1d_size: str, l1d_assoc: int, l1d_latency: int,
         l1i_size: str, l1i_assoc: int, l1i_latency: int,
         l2_size: str,  l2_assoc: int,  l2_latency: int,
@@ -135,6 +159,7 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
         cache_line_size: int = 64,
     ) -> None:
         super().__init__()
+        self._prefetcher_map = prefetcher_map
         self._l1d_size, self._l1d_assoc, self._l1d_latency = l1d_size, l1d_assoc, l1d_latency
         self._l1i_size, self._l1i_assoc, self._l1i_latency = l1i_size, l1i_assoc, l1i_latency
         self._l2_size,  self._l2_assoc,  self._l2_latency  = l2_size,  l2_assoc,  l2_latency
@@ -146,14 +171,15 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
         self.membus.default = self.membus.badaddr_responder.pio
 
     def _get_prefetcher(self, level: str):
-        if PREFETCHER_TYPE is None or not PREFETCHER_LEVELS.get(level, False):
+        prefetcher_type = self._prefetcher_map.get(level)
+        if prefetcher_type is None:
             return None
-        if PREFETCHER_TYPE not in self._PREFETCHER_CLASSES:
+        if prefetcher_type not in self._PREFETCHER_CLASSES:
             raise ValueError(
-                f"Unknown PREFETCHER_TYPE {PREFETCHER_TYPE!r}. "
+                f"Unknown prefetcher type {prefetcher_type!r} for level {level}. "
                 "Use one of: None, 'indirect', 'IMPv2', 'stride', 'tagged', 'ampm', 'bop', 'stems'."
             )
-        if PREFETCHER_TYPE == "indirect":
+        if prefetcher_type == "indirect":
             # In this gem5 version, IndirectMemoryPrefetcher may receive hit
             # probes with requests that do not carry payload data. Restricting
             # it to miss events avoids PrefetchInfo::get() panics.
@@ -163,7 +189,7 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
                 on_miss=True,
                 prefetch_on_pf_hit=False,
             )
-        # if PREFETCHER_TYPE == "IMPv2":
+        # if prefetcher_type == "IMPv2":
         #     # IMPv2 is optimized for miss-based prefetching to avoid issues
         #     # with prefetch hit probes that lack payload data
         #     return IMPv2Prefetcher(
@@ -172,7 +198,7 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
         #         on_miss=True,
         #         prefetch_on_pf_hit=False,
         #     )
-        return self._PREFETCHER_CLASSES[PREFETCHER_TYPE]()
+        return self._PREFETCHER_CLASSES[prefetcher_type]()
 
     @overrides(AbstractClassicCacheHierarchy)
     def get_mem_side_port(self):
@@ -297,6 +323,208 @@ def _create_x86_o3_cpu(cpu_id: int = 0) -> X86O3CPU:
     return cpu
 
 
+def _prefetcher_slug(prefetcher_type: str | None) -> str:
+    return "none" if prefetcher_type is None else prefetcher_type.lower()
+
+
+def _make_prefetcher_map(
+    prefetchers: tuple[str | None, str | None, str | None, str | None],
+) -> dict[str, str | None]:
+    return dict(zip(PREFETCHER_LEVELS, prefetchers, strict=True))
+
+
+def _validate_level_combination(level_combination: tuple[str, ...]) -> tuple[str, ...]:
+    invalid_levels = [level for level in level_combination if level not in PREFETCHER_LEVELS]
+    if invalid_levels:
+        raise ValueError(
+            "Invalid cache levels in LEVEL_COMBINATIONS_TO_TEST: "
+            + ", ".join(invalid_levels)
+            + f". Valid levels are: {', '.join(PREFETCHER_LEVELS)}"
+        )
+    return tuple(dict.fromkeys(level_combination))
+
+
+def _iter_prefetcher_maps_for_level_combination(level_combination: tuple[str, ...]):
+    active_levels = set(_validate_level_combination(level_combination))
+    for selected_prefetcher in PREFETCHER_TYPES:
+        yield {
+            level: (selected_prefetcher if level in active_levels else None)
+            for level in PREFETCHER_LEVELS
+        }
+
+
+def _summary_path() -> Path:
+    M5OUT_ROOT.mkdir(parents=True, exist_ok=True)
+    return M5OUT_ROOT / SUMMARY_CSV_NAME
+
+
+def _extract_stat_value(
+    stats_path: Path,
+    stat_name: str,
+    max_attempts: int = 100, # 10 seconds
+    retry_delay_seconds: float = 0.1,
+):
+    for attempt in range(max_attempts):
+        if stats_path.exists():
+            with stats_path.open("r", encoding="utf-8") as stats_file:
+                for line in stats_file:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+                        continue
+                    fields = stripped.split()
+                    if len(fields) >= 2 and fields[0] == stat_name:
+                        return fields[1]
+        if attempt != max_attempts - 1:
+            time.sleep(retry_delay_seconds)
+    raise KeyError(f"Stat {stat_name!r} not found in {stats_path}")
+
+
+def _wait_for_stats_ready(
+    stats_path: Path,
+    max_attempts: int = 120, # 1 minute
+    retry_delay_seconds: float = 0.5,
+) -> bool:
+    for attempt in range(max_attempts):
+        if stats_path.exists() and stats_path.stat().st_size > 0:
+            return True
+        if attempt != max_attempts - 1:
+            time.sleep(retry_delay_seconds)
+    return False
+
+
+def _record_summary_row(
+    stats_path: Path,
+    benchmark_name: str,
+    prefetcher_map: dict[str, str | None],
+) -> bool:
+    if not _wait_for_stats_ready(stats_path):
+        return True
+
+    try:
+        sim_seconds = float(_extract_stat_value(stats_path, "simSeconds"))
+    except KeyError:
+        final_tick = float(_extract_stat_value(stats_path, "finalTick"))
+        sim_freq = float(_extract_stat_value(stats_path, "simFreq"))
+        sim_seconds = final_tick / sim_freq if sim_freq else float("nan")
+
+    sim_insts = int(_extract_stat_value(stats_path, "simInsts"))
+
+    try:
+        sim_cycles = int(_extract_stat_value(stats_path, "board.processor.cores.core.numCycles"))
+    except KeyError:
+        sim_ticks = float(_extract_stat_value(stats_path, "simTicks"))
+        sim_freq = float(_extract_stat_value(stats_path, "simFreq"))
+        clock_hz = float(CLOCK_FREQUENCY.rstrip("GHz")) * 1e9
+        sim_cycles = int((sim_ticks / sim_freq) * clock_hz) if sim_freq else 0
+
+    try:
+        ipc = float(_extract_stat_value(stats_path, "board.processor.cores.core.ipc"))
+    except KeyError:
+        ipc = sim_insts / sim_cycles if sim_cycles else float("nan")
+
+    summary_file = _summary_path()
+    row = {
+        "simulation_id": stats_path.parent.name,
+        "benchmark": benchmark_name,
+        "l1i_prefetcher": _prefetcher_slug(prefetcher_map["l1i"]),
+        "l1d_prefetcher": _prefetcher_slug(prefetcher_map["l1d"]),
+        "l2_prefetcher": _prefetcher_slug(prefetcher_map["l2"]),
+        "l3_prefetcher": _prefetcher_slug(prefetcher_map["l3"]),
+        "ipc": f"{ipc:.6f}",
+        "sim_seconds": f"{sim_seconds:.9f}",
+        "sim_insts": str(sim_insts),
+        "sim_cycles": str(sim_cycles),
+    }
+
+    with summary_file.open("a+", encoding="utf-8", newline="") as csv_file:
+        fcntl.flock(csv_file, fcntl.LOCK_EX)
+        csv_file.seek(0, os.SEEK_END)
+        writer = csv.DictWriter(csv_file, fieldnames=list(row.keys()))
+        if csv_file.tell() == 0:
+            writer.writeheader()
+        writer.writerow(row)
+        csv_file.flush()
+        os.fsync(csv_file.fileno())
+        fcntl.flock(csv_file, fcntl.LOCK_UN)
+
+    return True
+
+
+class CryptoPrefetcherSweepSimulator:
+    def __init__(
+        self,
+        benchmark_name: str,
+        binary_path: Path,
+        arguments: list[str],
+        prefetcher_map: dict[str, str | None],
+    ) -> None:
+        self._benchmark_name = benchmark_name
+        self._binary_path = binary_path
+        self._arguments = arguments
+        self._prefetcher_map = prefetcher_map
+        self._outdir = None
+        self._id = "crypto_" + benchmark_name + "__" + "_".join(
+            f"{level}-{_prefetcher_slug(prefetcher_map[level])}"
+            for level in PREFETCHER_LEVELS
+        )
+
+    def get_id(self):
+        return self._id
+
+    def set_id(self, simulator_id: str) -> None:
+        self._id = simulator_id
+
+    def override_outdir(self, outdir: Path) -> None:
+        self._outdir = Path(outdir)
+
+    def _build_simulator(self) -> Simulator:
+        cache_hierarchy = ThreeLevelClassicCacheHierarchy(
+            prefetcher_map=self._prefetcher_map,
+            **{f"l1d_{k}": v for k, v in L1D_CONFIG.items()},
+            **{f"l1i_{k}": v for k, v in L1I_CONFIG.items()},
+            **{f"l2_{k}":  v for k, v in L2_CONFIG.items()},
+            **{f"l3_{k}":  v for k, v in L3_CONFIG.items()},
+            cache_line_size=CACHE_LINE_SIZE,
+        )
+        board = SimpleBoard(
+            clk_freq=CLOCK_FREQUENCY,
+            processor=BaseCPUProcessor(
+                cores=[BaseCPUCore(core=_create_x86_o3_cpu(), isa=ISA.X86)]
+            ),
+            memory=SingleChannelDDR4_2400(size=MEMORY_SIZE),
+            cache_hierarchy=cache_hierarchy,
+        )
+        board.set_se_binary_workload(
+            binary=BinaryResource(local_path=str(self._binary_path), architecture=ISA.X86),
+            arguments=self._arguments,
+        )
+
+        return Simulator(
+            board=board,
+            id=self._id,
+            outdir=self._outdir,
+        )
+
+    def run(self) -> None:
+        simulator = self._build_simulator()
+        simulator.run()
+        if self._outdir is not None:
+            try:
+                import m5
+
+                m5.stats.dump()
+                _record_summary_row(
+                    stats_path=self._outdir / "stats.txt",
+                    benchmark_name=self._benchmark_name,
+                    prefetcher_map=self._prefetcher_map,
+                )
+            except Exception as summary_error:
+                print(
+                    "Warning: could not append summary row for "
+                    f"{self._id}: {summary_error}"
+                )
+
+
 def _resolve_binary_path(candidates):
     for candidate in candidates:
         path = Path(candidate)
@@ -311,39 +539,28 @@ def _resolve_binary_path(candidates):
         + "\nBuild the target, update BENCHMARK_PATH_CANDIDATES, or disable it."
     )
 
-
-def _create_board(binary_path: Path, arguments: list[str]) -> SimpleBoard:
-    cache_hierarchy = ThreeLevelClassicCacheHierarchy(
-        **{f"l1d_{k}": v for k, v in L1D_CONFIG.items()},
-        **{f"l1i_{k}": v for k, v in L1I_CONFIG.items()},
-        **{f"l2_{k}":  v for k, v in L2_CONFIG.items()},
-        **{f"l3_{k}":  v for k, v in L3_CONFIG.items()},
-        cache_line_size=CACHE_LINE_SIZE,
-    )
-    board = SimpleBoard(
-        clk_freq=CLOCK_FREQUENCY,
-        processor=BaseCPUProcessor(
-            cores=[BaseCPUCore(core=_create_x86_o3_cpu(), isa=ISA.X86)]
-        ),
-        memory=SingleChannelDDR4_2400(size=MEMORY_SIZE),
-        cache_hierarchy=cache_hierarchy,
-    )
-    board.set_se_binary_workload(
-        binary=BinaryResource(local_path=str(binary_path), architecture=ISA.X86),
-        arguments=arguments,
-    )
-    return board
-
-
 active_benchmarks = [name for name, enabled in ENABLED_BENCHMARKS.items() if enabled]
 if not active_benchmarks:
     raise RuntimeError("At least one benchmark must be enabled.")
 
-multisim.set_num_processes(min(MAX_PARALLEL_SIMULATIONS, len(active_benchmarks)))
+simulator_specs = []
+seen_specs = set()
+for benchmark_name in active_benchmarks:
+    for level_combination in LEVEL_COMBINATIONS_TO_TEST:
+        for prefetcher_map in _iter_prefetcher_maps_for_level_combination(level_combination):
+            key = (benchmark_name, tuple(prefetcher_map[level] for level in PREFETCHER_LEVELS))
+            if key not in seen_specs:
+                seen_specs.add(key)
+                simulator_specs.append((benchmark_name, prefetcher_map))
 
-for name in active_benchmarks:
-    board = _create_board(
-        binary_path=_resolve_binary_path(BENCHMARK_PATH_CANDIDATES[name]),
-        arguments=BENCHMARK_ARGUMENTS.get(name, []),
+multisim.set_num_processes(min(MAX_PARALLEL_SIMULATIONS, len(simulator_specs)))
+
+for benchmark_name, prefetcher_map in simulator_specs:
+    multisim.add_simulator(
+        CryptoPrefetcherSweepSimulator(
+            benchmark_name=benchmark_name,
+            binary_path=_resolve_binary_path(BENCHMARK_PATH_CANDIDATES[benchmark_name]),
+            arguments=BENCHMARK_ARGUMENTS.get(benchmark_name, []),
+            prefetcher_map=prefetcher_map,
+        )
     )
-    multisim.add_simulator(Simulator(board=board, id=f"crypto_{name}"))
