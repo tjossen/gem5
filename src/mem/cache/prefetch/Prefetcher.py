@@ -230,74 +230,48 @@ class TaggedPrefetcher(QueuedPrefetcher):
     degree = Param.Int(2, "Number of prefetches to generate")
 
 
-def load_hints_from_csv(csv_file):
-    """Load hints from a CSV file with format: pc,addr (one per line, hex or decimal).
-    Returns a list of strings formatted as 'pc:addr' for C++ parsing.
-    """
-    hints = []
-    try:
-        with open(csv_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                # Skip comments and empty lines
-                if not line or line.startswith('#'):
-                    continue
-                parts = line.split(',')
-                if len(parts) < 2:
-                    print(f"Warning: skipping malformed hint line: {line}")
-                    continue
-                pc_str = parts[0].strip()
-                addr_str = parts[1].strip()
-                # Parse hex (0x...) or decimal
-                try:
-                    pc = int(pc_str, 0)
-                    addr = int(addr_str, 0)
-                    hints.append(f"{pc:x}:{addr:x}")  # Store as hex strings
-                except ValueError:
-                    print(f"Warning: could not parse hint values: {pc_str}, {addr_str}")
-        print(f"Loaded {len(hints)} hints from {csv_file}")
-    except FileNotFoundError:
-        print(f"Warning: hints file not found: {csv_file}")
-    return hints
-
-
 class HintBasedPrefetcher(QueuedPrefetcher):
-    """Hint-based prefetcher that issues prefetches when the access PC
-    matches a hinted PC. Hints can be supplied via `hints_file` (CSV)
-    or programmatically in the config.
+    """Hint-based prefetcher that consumes chronological hints when retired
+    instruction PCs match the current hint cursor.
 
-    CSV format: one hint per line with columns pc,addr (hex or decimal).
+    CSV format: one hint per line with columns pc,address,size.
     Example:
-        0x1000,0x2000
-        0x1008,0x3000
+        pc,address,size
+        0x1000,0x2000,8
+        0x1008,0x3000,16
         # comment line
     """
 
     type = "HintBasedPrefetcher"
     cxx_class = "gem5::prefetch::HintBased"
     cxx_header = "mem/cache/prefetch/hint_based.hh"
+    cxx_exports = [
+        PyBindMethod("addEventProbeRetiredInsts"),
+        PyBindMethod("setCache"),
+    ]
 
-    # Parsed hints passed to C++ (pc:addr format)
-    hints_list = VectorParam.String([], "List of parsed hints (pc:addr format)")
-
-    # Optional CSV or protobuf file containing hints (pc,addr)
-    hints_file = Param.String("", "Path to CSV or protobuf file with hints")
-    hints_format = Param.String("csv", "Format of the hints file: csv|protobuf")
-
-    # When to check hints: 'access' or 'miss'
-    match_on = Param.String("access", "When to check hints: access|miss")
-
-    # If multiple hints exist for the same PC, issue all by default
-    issue_all_hints = Param.Bool(True, "Issue all hinted addresses for a matching PC")
+    hints_file = Param.String("", "Path to CSV file with pc,address,size hints")
 
     def __init__(self, **kwargs):
-        # Load hints from file if specified
-        hints_file = kwargs.get('hints_file', '')
-        if hints_file and isinstance(hints_file, str) and len(hints_file) > 0:
-            loaded_hints = load_hints_from_csv(hints_file)
-            if loaded_hints:
-                kwargs['hints_list'] = loaded_hints
         super().__init__(**kwargs)
+        self._cache = None
+
+    def regProbeListeners(self):
+        if self._cache:
+            self.getCCObject().setCache(self._cache.getCCObject())
+        super().regProbeListeners()
+
+    def registerCache(self, simObj):
+        if not isinstance(simObj, SimObject):
+            raise TypeError("argument must be a SimObject type")
+        self._cache = simObj
+
+    def listenFromProbeRetiredInstructions(self, simObj):
+        if not isinstance(simObj, SimObject):
+            raise TypeError("argument must be of SimObject type")
+        self.addEvent(
+            HWPProbeEventRetiredInsts(self, simObj, "RetiredInstsPC")
+        )
 
 
 class IndirectMemoryPrefetcher(QueuedPrefetcher):

@@ -20,6 +20,7 @@ from m5.objects import (
     BOPPrefetcher,
     BranchPredictor,
     Cache,
+    HintBasedPrefetcher,
     IMPv2Prefetcher,
     IndirectMemoryPrefetcher,
     L2XBar,
@@ -126,6 +127,8 @@ PREFETCHER_TYPES = [
     "bop",
     "stems",
 ]
+# "hint" is intentionally available to hand-selected maps but is not included
+# in PREFETCHER_TYPES yet, so the default sweep remains unchanged.
 PREFETCHER_LEVELS = ("l1i", "l1d", "l2", "l3")
 # Manually choose which cache-level combinations to sweep.
 # Each entry enables prefetcher variation only on those levels.
@@ -149,12 +152,23 @@ LEVEL_COMBINATIONS_TO_TEST = [
     ("l1i", "l1d", "l2", "l3"),  # all levels
 ]
 SUMMARY_CSV_NAME = "crypto_prefetcher_sweep.csv"
+DEFAULT_HINT_LOOKBACK = 20
+DEFAULT_HINT_CSV_NAME = f"hints_pc{DEFAULT_HINT_LOOKBACK}.csv"
+
+
+def default_hint_path(benchmark_name: str) -> Path:
+    return (
+        M5OUT_ROOT
+        / f"crypto_{benchmark_name}_commit_trace"
+        / DEFAULT_HINT_CSV_NAME
+    )
 
 
 class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
     """Private L1/L2 per-core with a shared L3 and classic memory system."""
 
     _PREFETCHER_CLASSES = {
+        "hint": HintBasedPrefetcher,
         "indirect": IndirectMemoryPrefetcher,
         "IMPv2": IMPv2Prefetcher,
         "stride": StridePrefetcher,
@@ -179,10 +193,12 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
         l3_size: str,
         l3_assoc: int,
         l3_latency: int,
+        benchmark_name: str | None = None,
         cache_line_size: int = 64,
     ) -> None:
         super().__init__()
         self._prefetcher_map = prefetcher_map
+        self._benchmark_name = benchmark_name
         self._l1d_size, self._l1d_assoc, self._l1d_latency = (
             l1d_size,
             l1d_assoc,
@@ -209,15 +225,40 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
         self.membus.badaddr_responder = BadAddr()
         self.membus.default = self.membus.badaddr_responder.pio
 
-    def _get_prefetcher(self, level: str):
+    def _hint_file_path(self) -> Path:
+        if self._benchmark_name is None:
+            raise ValueError(
+                "HintBasedPrefetcher requires benchmark_name to resolve hints"
+            )
+        return default_hint_path(self._benchmark_name)
+
+    def _get_prefetcher(self, level: str, cache: Cache | None = None, cpu=None):
         prefetcher_type = self._prefetcher_map.get(level)
         if prefetcher_type is None:
             return None
         if prefetcher_type not in self._PREFETCHER_CLASSES:
             raise ValueError(
                 f"Unknown prefetcher type {prefetcher_type!r} for level {level}. "
-                "Use one of: None, 'indirect', 'IMPv2', 'stride', 'tagged', 'ampm', 'bop', 'stems'."
+                "Use one of: None, 'hint', 'indirect', 'IMPv2', 'stride', "
+                "'tagged', 'ampm', 'bop', 'stems'."
             )
+        if prefetcher_type == "hint":
+            if cache is None or cpu is None:
+                raise ValueError(
+                    "HintBasedPrefetcher requires a cache and CPU probe source"
+                )
+            prefetcher = HintBasedPrefetcher(
+                hints_file=str(self._hint_file_path()),
+                on_inst=False,
+                on_write=False,
+                on_miss=False,
+                prefetch_on_access=False,
+            )
+            prefetcher.registerCache(cache)
+            prefetcher.listenFromProbeRetiredInstructions(
+                cpu.get_simobject()
+            )
+            return prefetcher
         if prefetcher_type == "indirect":
             # In this gem5 version, IndirectMemoryPrefetcher may receive hit
             # probes with requests that do not carry payload data. Restricting
@@ -251,6 +292,8 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
     def incorporate_cache(self, board):
         board.cache_line_size = self._cache_line_size
         board.connect_system_port(self.membus.cpu_side_ports)
+        cores = list(board.get_processor().get_cores())
+        hint_core = cores[0] if cores else None
 
         for _, port in board.get_mem_ports():
             self.membus.mem_side_ports = port
@@ -266,14 +309,14 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
             tgts_per_mshr=32,
             clusivity="mostly_incl",
         )
-        l3_prefetcher = self._get_prefetcher("l3")
+        l3_prefetcher = self._get_prefetcher("l3", self._l3cache, hint_core)
         if l3_prefetcher is not None:
             self._l3cache.prefetcher = l3_prefetcher
         l3_node = self.add_root_child("l3_cache", self._l3cache)
         self._l3cache.cpu_side = self.l3bus.mem_side_ports
         self._l3cache.mem_side = self.membus.cpu_side_ports
 
-        for i, cpu in enumerate(board.get_processor().get_cores()):
+        for i, cpu in enumerate(cores):
             l2bus = L2XBar(width=64)
             setattr(self, f"l2bus_{i}", l2bus)
 
@@ -287,7 +330,7 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
                 tgts_per_mshr=24,
                 clusivity="mostly_incl",
             )
-            l2_prefetcher = self._get_prefetcher("l2")
+            l2_prefetcher = self._get_prefetcher("l2", l2cache, cpu)
             if l2_prefetcher is not None:
                 l2cache.prefetcher = l2_prefetcher
             l2_node = l3_node.add_child(f"l2_cache_{i}", l2cache)
@@ -303,7 +346,7 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
                 is_read_only=True,
                 writeback_clean=False,
             )
-            l1i_prefetcher = self._get_prefetcher("l1i")
+            l1i_prefetcher = self._get_prefetcher("l1i", l1icache, cpu)
             if l1i_prefetcher is not None:
                 l1icache.prefetcher = l1i_prefetcher
             l2_node.add_child(f"l1i_cache_{i}", l1icache)
@@ -318,7 +361,7 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
                 tgts_per_mshr=20,
                 writeback_clean=False,
             )
-            l1d_prefetcher = self._get_prefetcher("l1d")
+            l1d_prefetcher = self._get_prefetcher("l1d", l1dcache, cpu)
             if l1d_prefetcher is not None:
                 l1dcache.prefetcher = l1d_prefetcher
             l2_node.add_child(f"l1d_cache_{i}", l1dcache)
@@ -552,6 +595,7 @@ class CryptoPrefetcherSweepSimulator:
             **{f"l1i_{k}": v for k, v in L1I_CONFIG.items()},
             **{f"l2_{k}": v for k, v in L2_CONFIG.items()},
             **{f"l3_{k}": v for k, v in L3_CONFIG.items()},
+            benchmark_name=self._benchmark_name,
             cache_line_size=CACHE_LINE_SIZE,
         )
         board = SimpleBoard(
