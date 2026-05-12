@@ -114,10 +114,7 @@ L2_CONFIG = {
 }  # rounded from 1280KiB
 L3_CONFIG = {"size": "32MiB", "assoc": 16, "latency": 40}  # rounded from 30MiB
 
-ELASTIC_TRACE_INST_FILE = "fetchtrace.proto.gz"
-ELASTIC_TRACE_DATA_FILE = "deptrace.proto.gz"
-ELASTIC_TRACE_START_INST = 0
-ELASTIC_TRACE_TRACE_VIRT_ADDR = False
+COMMIT_TRACE_START_INST = 0
 
 PREFETCHER_TYPES = [
     None,

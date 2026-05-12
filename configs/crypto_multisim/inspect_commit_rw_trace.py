@@ -16,9 +16,9 @@ M5OUT_ROOT = GEM5_ROOT / "m5out"
 
 
 def trace_output_dir(benchmark_name: str) -> Path:
-    fullmem_dir = M5OUT_ROOT / f"crypto_{benchmark_name}_etrace_fullmem"
-    if fullmem_dir.exists():
-        return fullmem_dir
+    commit_trace_dir = M5OUT_ROOT / f"crypto_{benchmark_name}_commit_trace"
+    if commit_trace_dir.exists():
+        return commit_trace_dir
     legacy_dir = M5OUT_ROOT / f"crypto_{benchmark_name}_etrace"
     return legacy_dir
 

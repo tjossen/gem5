@@ -11,7 +11,3 @@ class SimpleMemTrace(ProbeListenerObject):
         0,
         "Number of committed instructions to skip before tracing",
     )
-    cacheHitMissLevel = Param.Int(
-        -1,
-        "Reserved for future cache hit/miss annotation support",
-    )

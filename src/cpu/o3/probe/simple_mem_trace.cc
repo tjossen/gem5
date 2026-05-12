@@ -25,8 +25,8 @@ SimpleMemTrace::SimpleMemTrace(const SimpleMemTraceParams &params)
         "Could not open commit trace file %s", filename);
 
     traceStream
-        << "thread_id,instruction_pointer,\
-        access_type,memory_address,access_size\n";
+        << "thread_id,instruction_pointer,access_type,"
+        << "memory_address,access_size\n";
 
     registerExitCallback([this]() { flushTraces(); });
 }
@@ -51,6 +51,11 @@ SimpleMemTrace::traceCommit(const DynInstPtr& dynInst)
     }
 
     if (!dynInst->isLoad() && !dynInst->isStore()) {
+        return;
+    }
+
+    if (!dynInst->hasRequest() || !dynInst->effAddrValid() ||
+        dynInst->effSize == 0) {
         return;
     }
 
