@@ -8,28 +8,28 @@
 import csv
 import fcntl
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 
-import gem5.utils.multisim as multisim
 from m5.objects import (
+    LTAGE,
+    LTAGE_TAGE,
+    X86O3CPU,
     AMPMPrefetcher,
     BadAddr,
     BOPPrefetcher,
     BranchPredictor,
     Cache,
-    IndirectMemoryPrefetcher,
     IMPv2Prefetcher,
+    IndirectMemoryPrefetcher,
     L2XBar,
-    LTAGE,
-    LTAGE_TAGE,
     STeMSPrefetcher,
     StridePrefetcher,
     SystemXBar,
     TaggedPrefetcher,
-    X86O3CPU,
 )
 
+import gem5.utils.multisim as multisim
 from gem5.components.boards.simple_board import SimpleBoard
 from gem5.components.cachehierarchies.abstract_cache_hierarchy import (
     AbstractCacheHierarchy,
@@ -46,17 +46,17 @@ from gem5.simulate.simulator import Simulator
 from gem5.utils.override import overrides
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-GEM5_ROOT  = SCRIPT_DIR.parent.parent
-SRC_ROOT   = GEM5_ROOT.parent
+GEM5_ROOT = SCRIPT_DIR.parent.parent
+SRC_ROOT = GEM5_ROOT.parent
 M5OUT_ROOT = GEM5_ROOT / "m5out"
 
 
 # --- Benchmark setup ---
 # Flip booleans to quickly include/exclude a benchmark.
 ENABLED_BENCHMARKS = {
-    "chacha20":   True,
-    "kyber768":   True, 
-    "sha256":     True,
+    "chacha20": True,
+    "kyber768": True,
+    "sha256": True,
     "curve25519": True,
 }
 
@@ -80,9 +80,9 @@ BENCHMARK_PATH_CANDIDATES = {
 }
 
 BENCHMARK_ARGUMENTS = {
-    "chacha20":   [],
-    "kyber768":   [],
-    "sha256":     [],
+    "chacha20": [],
+    "kyber768": [],
+    "sha256": [],
     "curve25519": [],
 }
 
@@ -91,26 +91,44 @@ MAX_PARALLEL_SIMULATIONS = 16
 
 # --- Architecture setup ---
 CLOCK_FREQUENCY = "3GHz"
-MEMORY_SIZE     = "8GiB"
+MEMORY_SIZE = "8GiB"
 CACHE_LINE_SIZE = 64
 
-CPU_WIDTH           = 8
-LOAD_QUEUE_ENTRIES  = 192
+CPU_WIDTH = 8
+LOAD_QUEUE_ENTRIES = 192
 STORE_QUEUE_ENTRIES = 114
-ROB_ENTRIES         = 512
-IQ_ENTRIES          = 96
-PHYS_INT_REGS       = 280
-PHYS_FLOAT_REGS     = 332
+ROB_ENTRIES = 512
+IQ_ENTRIES = 96
+PHYS_INT_REGS = 280
+PHYS_FLOAT_REGS = 332
 
 # None keeps gem5 LTAGE defaults; an integer overrides all logTagTableSizes entries.
 LTAGE_LOG_TAG_TABLE_SIZE = None
 
-L1D_CONFIG = {"size": "48KiB",   "assoc": 12, "latency": 5}
-L1I_CONFIG = {"size": "32KiB",   "assoc": 8,  "latency": 5}
-L2_CONFIG  = {"size": "1024KiB", "assoc": 16, "latency": 14}  # rounded from 1280KiB
-L3_CONFIG  = {"size": "32MiB",   "assoc": 16, "latency": 40}  # rounded from 30MiB
+L1D_CONFIG = {"size": "48KiB", "assoc": 12, "latency": 5}
+L1I_CONFIG = {"size": "32KiB", "assoc": 8, "latency": 5}
+L2_CONFIG = {
+    "size": "1024KiB",
+    "assoc": 16,
+    "latency": 14,
+}  # rounded from 1280KiB
+L3_CONFIG = {"size": "32MiB", "assoc": 16, "latency": 40}  # rounded from 30MiB
 
-PREFETCHER_TYPES = [None, "indirect", "IMPv2", "stride", "tagged", "ampm", "bop", "stems"]
+ELASTIC_TRACE_INST_FILE = "fetchtrace.proto.gz"
+ELASTIC_TRACE_DATA_FILE = "deptrace.proto.gz"
+ELASTIC_TRACE_START_INST = 0
+ELASTIC_TRACE_TRACE_VIRT_ADDR = False
+
+PREFETCHER_TYPES = [
+    None,
+    "indirect",
+    "IMPv2",
+    "stride",
+    "tagged",
+    "ampm",
+    "bop",
+    "stems",
+]
 PREFETCHER_LEVELS = ("l1i", "l1d", "l2", "l3")
 # Manually choose which cache-level combinations to sweep.
 # Each entry enables prefetcher variation only on those levels.
@@ -141,29 +159,53 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
 
     _PREFETCHER_CLASSES = {
         "indirect": IndirectMemoryPrefetcher,
-        "IMPv2":  IMPv2Prefetcher,
+        "IMPv2": IMPv2Prefetcher,
         "stride": StridePrefetcher,
         "tagged": TaggedPrefetcher,
-        "ampm":   AMPMPrefetcher,
-        "bop":    BOPPrefetcher,
-        "stems":  STeMSPrefetcher,
+        "ampm": AMPMPrefetcher,
+        "bop": BOPPrefetcher,
+        "stems": STeMSPrefetcher,
     }
 
     def __init__(
         self,
         prefetcher_map: dict[str, str | None],
-        l1d_size: str, l1d_assoc: int, l1d_latency: int,
-        l1i_size: str, l1i_assoc: int, l1i_latency: int,
-        l2_size: str,  l2_assoc: int,  l2_latency: int,
-        l3_size: str,  l3_assoc: int,  l3_latency: int,
+        l1d_size: str,
+        l1d_assoc: int,
+        l1d_latency: int,
+        l1i_size: str,
+        l1i_assoc: int,
+        l1i_latency: int,
+        l2_size: str,
+        l2_assoc: int,
+        l2_latency: int,
+        l3_size: str,
+        l3_assoc: int,
+        l3_latency: int,
         cache_line_size: int = 64,
     ) -> None:
         super().__init__()
         self._prefetcher_map = prefetcher_map
-        self._l1d_size, self._l1d_assoc, self._l1d_latency = l1d_size, l1d_assoc, l1d_latency
-        self._l1i_size, self._l1i_assoc, self._l1i_latency = l1i_size, l1i_assoc, l1i_latency
-        self._l2_size,  self._l2_assoc,  self._l2_latency  = l2_size,  l2_assoc,  l2_latency
-        self._l3_size,  self._l3_assoc,  self._l3_latency  = l3_size,  l3_assoc,  l3_latency
+        self._l1d_size, self._l1d_assoc, self._l1d_latency = (
+            l1d_size,
+            l1d_assoc,
+            l1d_latency,
+        )
+        self._l1i_size, self._l1i_assoc, self._l1i_latency = (
+            l1i_size,
+            l1i_assoc,
+            l1i_latency,
+        )
+        self._l2_size, self._l2_assoc, self._l2_latency = (
+            l2_size,
+            l2_assoc,
+            l2_latency,
+        )
+        self._l3_size, self._l3_assoc, self._l3_latency = (
+            l3_size,
+            l3_assoc,
+            l3_latency,
+        )
         self._cache_line_size = cache_line_size
 
         self.membus = SystemXBar(width=64)
@@ -291,34 +333,42 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
 
             cpu.connect_icache(l1icache.cpu_side)
             cpu.connect_dcache(l1dcache.cpu_side)
-            cpu.connect_walker_ports(l2bus.cpu_side_ports, l2bus.cpu_side_ports)
-            cpu.connect_interrupt(self.membus.mem_side_ports, self.membus.cpu_side_ports)
+            cpu.connect_walker_ports(
+                l2bus.cpu_side_ports, l2bus.cpu_side_ports
+            )
+            cpu.connect_interrupt(
+                self.membus.mem_side_ports, self.membus.cpu_side_ports
+            )
 
 
 def _create_x86_o3_cpu(cpu_id: int = 0) -> X86O3CPU:
     cpu = X86O3CPU(cpu_id=cpu_id)
 
-    cpu.fetchWidth    = CPU_WIDTH
-    cpu.decodeWidth   = CPU_WIDTH
-    cpu.renameWidth   = CPU_WIDTH
+    cpu.fetchWidth = CPU_WIDTH
+    cpu.decodeWidth = CPU_WIDTH
+    cpu.renameWidth = CPU_WIDTH
     cpu.dispatchWidth = CPU_WIDTH
-    cpu.issueWidth    = CPU_WIDTH
-    cpu.wbWidth       = CPU_WIDTH
-    cpu.commitWidth   = CPU_WIDTH
+    cpu.issueWidth = CPU_WIDTH
+    cpu.wbWidth = CPU_WIDTH
+    cpu.commitWidth = CPU_WIDTH
 
-    cpu.LQEntries               = LOAD_QUEUE_ENTRIES
-    cpu.SQEntries               = STORE_QUEUE_ENTRIES
-    cpu.numROBEntries           = ROB_ENTRIES
+    cpu.LQEntries = LOAD_QUEUE_ENTRIES
+    cpu.SQEntries = STORE_QUEUE_ENTRIES
+    cpu.numROBEntries = ROB_ENTRIES
     cpu.instQueues[0].numEntries = IQ_ENTRIES
-    cpu.numPhysIntRegs          = PHYS_INT_REGS
-    cpu.numPhysFloatRegs        = PHYS_FLOAT_REGS
+    cpu.numPhysIntRegs = PHYS_INT_REGS
+    cpu.numPhysFloatRegs = PHYS_FLOAT_REGS
 
     if LTAGE_LOG_TAG_TABLE_SIZE is None:
         cpu.branchPred = BranchPredictor(conditionalBranchPred=LTAGE())
     else:
         tage = LTAGE_TAGE()
-        tage.logTagTableSizes = [int(LTAGE_LOG_TAG_TABLE_SIZE)] * len(tage.logTagTableSizes)
-        cpu.branchPred = BranchPredictor(conditionalBranchPred=LTAGE(tage=tage))
+        tage.logTagTableSizes = [int(LTAGE_LOG_TAG_TABLE_SIZE)] * len(
+            tage.logTagTableSizes
+        )
+        cpu.branchPred = BranchPredictor(
+            conditionalBranchPred=LTAGE(tage=tage)
+        )
 
     return cpu
 
@@ -333,8 +383,12 @@ def _make_prefetcher_map(
     return dict(zip(PREFETCHER_LEVELS, prefetchers, strict=True))
 
 
-def _validate_level_combination(level_combination: tuple[str, ...]) -> tuple[str, ...]:
-    invalid_levels = [level for level in level_combination if level not in PREFETCHER_LEVELS]
+def _validate_level_combination(
+    level_combination: tuple[str, ...],
+) -> tuple[str, ...]:
+    invalid_levels = [
+        level for level in level_combination if level not in PREFETCHER_LEVELS
+    ]
     if invalid_levels:
         raise ValueError(
             "Invalid cache levels in LEVEL_COMBINATIONS_TO_TEST: "
@@ -344,7 +398,9 @@ def _validate_level_combination(level_combination: tuple[str, ...]) -> tuple[str
     return tuple(dict.fromkeys(level_combination))
 
 
-def _iter_prefetcher_maps_for_level_combination(level_combination: tuple[str, ...]):
+def _iter_prefetcher_maps_for_level_combination(
+    level_combination: tuple[str, ...],
+):
     active_levels = set(_validate_level_combination(level_combination))
     for selected_prefetcher in PREFETCHER_TYPES:
         yield {
@@ -361,7 +417,7 @@ def _summary_path() -> Path:
 def _extract_stat_value(
     stats_path: Path,
     stat_name: str,
-    max_attempts: int = 100, # 10 seconds
+    max_attempts: int = 100,  # 10 seconds
     retry_delay_seconds: float = 0.1,
 ):
     for attempt in range(max_attempts):
@@ -369,7 +425,11 @@ def _extract_stat_value(
             with stats_path.open("r", encoding="utf-8") as stats_file:
                 for line in stats_file:
                     stripped = line.strip()
-                    if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+                    if (
+                        not stripped
+                        or stripped.startswith("#")
+                        or stripped.startswith("-")
+                    ):
                         continue
                     fields = stripped.split()
                     if len(fields) >= 2 and fields[0] == stat_name:
@@ -381,7 +441,7 @@ def _extract_stat_value(
 
 def _wait_for_stats_ready(
     stats_path: Path,
-    max_attempts: int = 120, # 1 minute
+    max_attempts: int = 120,  # 1 minute
     retry_delay_seconds: float = 0.5,
 ) -> bool:
     for attempt in range(max_attempts):
@@ -410,7 +470,11 @@ def _record_summary_row(
     sim_insts = int(_extract_stat_value(stats_path, "simInsts"))
 
     try:
-        sim_cycles = int(_extract_stat_value(stats_path, "board.processor.cores.core.numCycles"))
+        sim_cycles = int(
+            _extract_stat_value(
+                stats_path, "board.processor.cores.core.numCycles"
+            )
+        )
     except KeyError:
         sim_ticks = float(_extract_stat_value(stats_path, "simTicks"))
         sim_freq = float(_extract_stat_value(stats_path, "simFreq"))
@@ -418,7 +482,9 @@ def _record_summary_row(
         sim_cycles = int((sim_ticks / sim_freq) * clock_hz) if sim_freq else 0
 
     try:
-        ipc = float(_extract_stat_value(stats_path, "board.processor.cores.core.ipc"))
+        ipc = float(
+            _extract_stat_value(stats_path, "board.processor.cores.core.ipc")
+        )
     except KeyError:
         ipc = sim_insts / sim_cycles if sim_cycles else float("nan")
 
@@ -463,9 +529,14 @@ class CryptoPrefetcherSweepSimulator:
         self._arguments = arguments
         self._prefetcher_map = prefetcher_map
         self._outdir = None
-        self._id = "crypto_" + benchmark_name + "__" + "_".join(
-            f"{level}-{_prefetcher_slug(prefetcher_map[level])}"
-            for level in PREFETCHER_LEVELS
+        self._id = (
+            "crypto_"
+            + benchmark_name
+            + "__"
+            + "_".join(
+                f"{level}-{_prefetcher_slug(prefetcher_map[level])}"
+                for level in PREFETCHER_LEVELS
+            )
         )
 
     def get_id(self):
@@ -482,8 +553,8 @@ class CryptoPrefetcherSweepSimulator:
             prefetcher_map=self._prefetcher_map,
             **{f"l1d_{k}": v for k, v in L1D_CONFIG.items()},
             **{f"l1i_{k}": v for k, v in L1I_CONFIG.items()},
-            **{f"l2_{k}":  v for k, v in L2_CONFIG.items()},
-            **{f"l3_{k}":  v for k, v in L3_CONFIG.items()},
+            **{f"l2_{k}": v for k, v in L2_CONFIG.items()},
+            **{f"l3_{k}": v for k, v in L3_CONFIG.items()},
             cache_line_size=CACHE_LINE_SIZE,
         )
         board = SimpleBoard(
@@ -495,7 +566,9 @@ class CryptoPrefetcherSweepSimulator:
             cache_hierarchy=cache_hierarchy,
         )
         board.set_se_binary_workload(
-            binary=BinaryResource(local_path=str(self._binary_path), architecture=ISA.X86),
+            binary=BinaryResource(
+                local_path=str(self._binary_path), architecture=ISA.X86
+            ),
             arguments=self._arguments,
         )
 
@@ -539,28 +612,47 @@ def _resolve_binary_path(candidates):
         + "\nBuild the target, update BENCHMARK_PATH_CANDIDATES, or disable it."
     )
 
-active_benchmarks = [name for name, enabled in ENABLED_BENCHMARKS.items() if enabled]
-if not active_benchmarks:
-    raise RuntimeError("At least one benchmark must be enabled.")
 
-simulator_specs = []
-seen_specs = set()
-for benchmark_name in active_benchmarks:
-    for level_combination in LEVEL_COMBINATIONS_TO_TEST:
-        for prefetcher_map in _iter_prefetcher_maps_for_level_combination(level_combination):
-            key = (benchmark_name, tuple(prefetcher_map[level] for level in PREFETCHER_LEVELS))
-            if key not in seen_specs:
-                seen_specs.add(key)
-                simulator_specs.append((benchmark_name, prefetcher_map))
+def main() -> None:
+    active_benchmarks = [
+        name for name, enabled in ENABLED_BENCHMARKS.items() if enabled
+    ]
+    if not active_benchmarks:
+        raise RuntimeError("At least one benchmark must be enabled.")
 
-multisim.set_num_processes(min(MAX_PARALLEL_SIMULATIONS, len(simulator_specs)))
+    simulator_specs = []
+    seen_specs = set()
+    for benchmark_name in active_benchmarks:
+        for level_combination in LEVEL_COMBINATIONS_TO_TEST:
+            for prefetcher_map in _iter_prefetcher_maps_for_level_combination(
+                level_combination
+            ):
+                key = (
+                    benchmark_name,
+                    tuple(
+                        prefetcher_map[level] for level in PREFETCHER_LEVELS
+                    ),
+                )
+                if key not in seen_specs:
+                    seen_specs.add(key)
+                    simulator_specs.append((benchmark_name, prefetcher_map))
 
-for benchmark_name, prefetcher_map in simulator_specs:
-    multisim.add_simulator(
-        CryptoPrefetcherSweepSimulator(
-            benchmark_name=benchmark_name,
-            binary_path=_resolve_binary_path(BENCHMARK_PATH_CANDIDATES[benchmark_name]),
-            arguments=BENCHMARK_ARGUMENTS.get(benchmark_name, []),
-            prefetcher_map=prefetcher_map,
-        )
+    multisim.set_num_processes(
+        min(MAX_PARALLEL_SIMULATIONS, len(simulator_specs))
     )
+
+    for benchmark_name, prefetcher_map in simulator_specs:
+        multisim.add_simulator(
+            CryptoPrefetcherSweepSimulator(
+                benchmark_name=benchmark_name,
+                binary_path=_resolve_binary_path(
+                    BENCHMARK_PATH_CANDIDATES[benchmark_name]
+                ),
+                arguments=BENCHMARK_ARGUMENTS.get(benchmark_name, []),
+                prefetcher_map=prefetcher_map,
+            )
+        )
+
+
+if __name__ == "__m5_main__":
+    main()
