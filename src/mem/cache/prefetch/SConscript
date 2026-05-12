@@ -31,7 +31,7 @@ Import('*')
 SimObject('Prefetcher.py', sim_objects=[
     'BasePrefetcher', 'MultiPrefetcher', 'QueuedPrefetcher',
     'StridePrefetcherHashedSetAssociative', 'StridePrefetcher',
-    'SmsPrefetcher', 'TaggedPrefetcher', 'IndirectMemoryPrefetcher',
+    'SmsPrefetcher', 'TaggedPrefetcher', 'HintBasedPrefetcher', 'IndirectMemoryPrefetcher',
     'SignaturePathPrefetcher', 'SignaturePathPrefetcherV2',
     'AccessMapPatternMatching', 'AMPMPrefetcher',
     'DeltaCorrelatingPredictionTables', 'DCPTPrefetcher',
@@ -59,3 +59,4 @@ Source('stride.cc')
 Source('tagged.cc')
 Source('fdp.cc')
 Source('indirect_memory_v2.cc')
+Source('hint_based.cc')
