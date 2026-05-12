@@ -251,6 +251,15 @@ class HintBasedPrefetcher(QueuedPrefetcher):
     ]
 
     hints_file = Param.String("", "Path to CSV file with pc,address,size hints")
+    hint_prefetch_percentage = Param.Percent(
+        30,
+        "Percentage of matched CSV hint rows to randomly prefetch",
+    )
+    hint_sampling_seed = Param.Unsigned(
+        1,
+        "Random seed used when sampling matched hint rows",
+    )
+    cache_snoop = True
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

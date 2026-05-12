@@ -57,6 +57,8 @@ HintBased::HintBasedStats::HintBasedStats(statistics::Group *parent)
                "is full"),
       ADD_STAT(hintSegmentsSkippedRedundant, statistics::units::Count::get(),
                "Number of hint request segments skipped by line-based filters"),
+      ADD_STAT(hintsSkippedBySampling, statistics::units::Count::get(),
+               "Number of matched hints skipped by random sampling"),
       ADD_STAT(retiredPCsObserved, statistics::units::Count::get(),
                "Number of retired PCs observed by the hint prefetcher"),
       ADD_STAT(retiredPCsSkipped, statistics::units::Count::get(),
@@ -70,8 +72,13 @@ HintBased::HintBasedStats::HintBasedStats(statistics::Group *parent)
 
 HintBased::HintBased(const HintBasedPrefetcherParams &p)
   : Queued(p), hintsFilePath(p.hints_file),
+    hintPrefetchPercentage(p.hint_prefetch_percentage),
+    rng(Random::genRandom(p.hint_sampling_seed)),
     statsHintBased(this)
 {
+    fatal_if(hintPrefetchPercentage > 100,
+             "HintBased: hint_prefetch_percentage must be in [0, 100]\n");
+
     if (!hintsFilePath.empty()) {
         DPRINTF(HWPrefetch, "HintBased: Loading hints from file: %s\n",
                 hintsFilePath);
@@ -180,12 +187,35 @@ HintBased::notifyRetiredInst(const Addr pc)
     do {
         const size_t matchedCursor = hintCursor;
         const Hint &hint = hints[hintCursor];
-        queueHint(hint, matchedCursor);
+        if (shouldPrefetchHint()) {
+            queueHint(hint, matchedCursor);
+        } else {
+            statsHintBased.hintsSkippedBySampling++;
+            DPRINTF(HWPrefetch, "HintBased: sampling skipped hint "
+                    "cursor=%llu PC=%#x Addr=%#x size=%u "
+                    "prefetch_percentage=%u\n",
+                    (unsigned long long)matchedCursor, hint.pc, hint.address,
+                    hint.size, hintPrefetchPercentage);
+        }
         statsHintBased.hintsMatched++;
         hintCursor++;
     } while (hintCursor < hints.size() && hints[hintCursor].pc == pc);
 
     scheduleCacheSend();
+}
+
+bool
+HintBased::shouldPrefetchHint()
+{
+    if (hintPrefetchPercentage >= 100) {
+        return true;
+    }
+
+    if (hintPrefetchPercentage == 0) {
+        return false;
+    }
+
+    return rng->random<unsigned>(1, 100) <= hintPrefetchPercentage;
 }
 
 void

@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/random.hh"
 #include "base/statistics.hh"
 #include "mem/cache/base.hh"
 #include "mem/cache/prefetch/queued.hh"
@@ -63,6 +64,8 @@ class HintBased : public Queued
     std::list<QueuedHint> hintQueue;
 
     const std::string hintsFilePath;
+    const unsigned hintPrefetchPercentage;
+    Random::RandomPtr rng;
     BaseCache *cache = nullptr;
 
     class PrefetchListenerPC : public ProbeListenerArgBase<Addr>
@@ -88,6 +91,7 @@ class HintBased : public Queued
         statistics::Scalar hintSegmentsQueued;
         statistics::Scalar hintSegmentsDroppedQueueFull;
         statistics::Scalar hintSegmentsSkippedRedundant;
+        statistics::Scalar hintsSkippedBySampling;
         statistics::Scalar retiredPCsObserved;
         statistics::Scalar retiredPCsSkipped;
         statistics::Scalar hintsLoaded;
@@ -102,6 +106,7 @@ class HintBased : public Queued
      */
     void loadHintsFromCSV(const std::string &filePath);
     void notifyRetiredInst(const Addr pc);
+    bool shouldPrefetchHint();
     void queueHint(const Hint &hint, const size_t hintIndex);
     void queueHintSegment(const Hint &hint, const size_t hintIndex,
                           const Addr requestAddr,
