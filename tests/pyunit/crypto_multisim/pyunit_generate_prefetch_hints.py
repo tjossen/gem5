@@ -121,6 +121,70 @@ Disassembly of section .text:
                 ],
             )
 
+    def test_generate_hints_can_use_seeded_random_lookback_range(self):
+        instruction_pcs = [0x2000 + index for index in range(16)]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            trace_path = temp_path / "commit_rw_trace.csv"
+            output_path = temp_path / "hints_random.csv"
+
+            with trace_path.open("w", encoding="utf-8", newline="") as file:
+                writer = csv.DictWriter(
+                    file,
+                    fieldnames=[
+                        "thread_id",
+                        "instruction_pointer",
+                        "access_type",
+                        "memory_address",
+                        "access_size",
+                    ],
+                )
+                writer.writeheader()
+                for pc, address in [
+                    ("0x2005", "0xaaa0"),
+                    ("0x2006", "0xbbb0"),
+                    ("0x2007", "0xccc0"),
+                    ("0x2008", "0xddd0"),
+                ]:
+                    writer.writerow(
+                        {
+                            "thread_id": "0",
+                            "instruction_pointer": pc,
+                            "access_type": "R",
+                            "memory_address": address,
+                            "access_size": "8",
+                        }
+                    )
+
+            stats = generate_hints_from_trace(
+                trace_path=trace_path,
+                instruction_pcs=instruction_pcs,
+                output_path=output_path,
+                lookback_min=2,
+                lookback_max=4,
+                lookback_seed=1,
+            )
+
+            self.assertEqual(stats.rows_read, 4)
+            self.assertEqual(stats.hints_written, 4)
+            self.assertEqual(stats.skipped_missing_pc, 0)
+            self.assertEqual(stats.skipped_early_pc, 0)
+
+            with output_path.open("r", encoding="utf-8", newline="") as file:
+                rows = list(csv.reader(file))
+
+            self.assertEqual(
+                rows,
+                [
+                    ["pc", "address", "size"],
+                    ["0x2003", "0xaaa0", "8"],
+                    ["0x2002", "0xbbb0", "8"],
+                    ["0x2005", "0xccc0", "8"],
+                    ["0x2005", "0xddd0", "8"],
+                ],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

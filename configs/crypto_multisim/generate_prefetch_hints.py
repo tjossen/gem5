@@ -4,6 +4,8 @@ Generate chronological prefetch hints from SimpleMemTrace commit traces.
 
 Examples:
   python3 configs/crypto_multisim/generate_prefetch_hints.py sha256
+  python3 configs/crypto_multisim/generate_prefetch_hints.py sha256 \
+      --lookback-min 5 --lookback-max 40 --lookback-seed 1
   python3 configs/crypto_multisim/generate_prefetch_hints.py \
       --trace /path/to/commit_rw_trace.csv --binary /path/to/binary
 """
@@ -11,6 +13,7 @@ Examples:
 import argparse
 import ast
 import csv
+import random
 import re
 import subprocess
 from dataclasses import dataclass
@@ -109,9 +112,29 @@ def generate_hints_from_trace(
     instruction_pcs: Iterable[int],
     output_path: Path,
     lookback: int = DEFAULT_TRACE_LOOKBACK,
+    lookback_min: int | None = None,
+    lookback_max: int | None = None,
+    lookback_seed: int = 1,
 ) -> HintGenerationStats:
     pcs_by_index = list(instruction_pcs)
     pc_to_index = {pc: index for index, pc in enumerate(pcs_by_index)}
+    use_random_lookback = lookback_min is not None or lookback_max is not None
+
+    if use_random_lookback:
+        if lookback_min is None or lookback_max is None:
+            raise ValueError(
+                "Both lookback_min and lookback_max are required for "
+                "random lookback"
+            )
+        if lookback_min < 0 or lookback_max < 0:
+            raise ValueError("Random lookback bounds must be non-negative")
+        if lookback_min > lookback_max:
+            raise ValueError("lookback_min must be <= lookback_max")
+        lookback_rng = random.Random(lookback_seed)
+    else:
+        if lookback < 0:
+            raise ValueError("lookback must be non-negative")
+        lookback_rng = None
 
     rows_read = 0
     hints_written = 0
@@ -141,11 +164,17 @@ def generate_hints_from_trace(
             if instruction_index is None:
                 skipped_missing_pc += 1
                 continue
-            if instruction_index < lookback:
+
+            row_lookback = (
+                lookback_rng.randint(lookback_min, lookback_max)
+                if lookback_rng is not None
+                else lookback
+            )
+            if instruction_index < row_lookback:
                 skipped_early_pc += 1
                 continue
 
-            hint_pc = pcs_by_index[instruction_index - lookback]
+            hint_pc = pcs_by_index[instruction_index - row_lookback]
             writer.writerow([_format_hex(hint_pc), _format_hex(address), size])
             hints_written += 1
 
@@ -158,7 +187,18 @@ def generate_hints_from_trace(
     )
 
 
-def default_output_path(trace_path: Path, lookback: int) -> Path:
+def default_output_path(
+    trace_path: Path,
+    lookback: int,
+    lookback_min: int | None = None,
+    lookback_max: int | None = None,
+    lookback_seed: int = 1,
+) -> Path:
+    if lookback_min is not None or lookback_max is not None:
+        return (
+            trace_path.parent
+            / f"hints_pc{lookback_min}-{lookback_max}_seed{lookback_seed}.csv"
+        )
     return trace_path.parent / f"hints_pc{lookback}.csv"
 
 
@@ -180,7 +220,13 @@ def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     output_path = (
         args.output.resolve()
         if args.output is not None
-        else default_output_path(trace_path, args.lookback)
+        else default_output_path(
+            trace_path,
+            args.lookback,
+            args.lookback_min,
+            args.lookback_max,
+            args.lookback_seed,
+        )
     )
     return trace_path, binary_path, output_path
 
@@ -204,13 +250,41 @@ def main() -> None:
         help="Number of static objdump instructions to look back",
     )
     parser.add_argument(
+        "--lookback-min",
+        type=int,
+        help="Minimum static objdump instructions to look back per row",
+    )
+    parser.add_argument(
+        "--lookback-max",
+        type=int,
+        help="Maximum static objdump instructions to look back per row",
+    )
+    parser.add_argument(
+        "--lookback-seed",
+        type=int,
+        default=1,
+        help="Seed for random lookback selection",
+    )
+    parser.add_argument(
         "--objdump",
         default=DEFAULT_OBJDUMP,
         help="objdump executable to use",
     )
     args = parser.parse_args()
 
-    if args.lookback < 0:
+    random_lookback = (
+        args.lookback_min is not None or args.lookback_max is not None
+    )
+    if random_lookback:
+        if args.lookback_min is None or args.lookback_max is None:
+            raise ValueError(
+                "--lookback-min and --lookback-max must be provided together"
+            )
+        if args.lookback_min < 0 or args.lookback_max < 0:
+            raise ValueError("--lookback-min/max must be non-negative")
+        if args.lookback_min > args.lookback_max:
+            raise ValueError("--lookback-min must be <= --lookback-max")
+    elif args.lookback < 0:
         raise ValueError("--lookback must be non-negative")
 
     trace_path, binary_path, output_path = _resolve_inputs(args)
@@ -220,11 +294,22 @@ def main() -> None:
         instruction_pcs=instruction_pcs,
         output_path=output_path,
         lookback=args.lookback,
+        lookback_min=args.lookback_min,
+        lookback_max=args.lookback_max,
+        lookback_seed=args.lookback_seed,
     )
 
     print(f"Trace: {trace_path}")
     print(f"Binary: {binary_path}")
     print(f"Output: {output_path}")
+    if random_lookback:
+        print(
+            "Lookback: "
+            f"random [{args.lookback_min}, {args.lookback_max}] "
+            f"seed={args.lookback_seed}"
+        )
+    else:
+        print(f"Lookback: fixed {args.lookback}")
     print(f"Rows read: {stats.rows_read}")
     print(f"Hints written: {stats.hints_written}")
     print(f"Skipped missing PCs: {stats.skipped_missing_pc}")
