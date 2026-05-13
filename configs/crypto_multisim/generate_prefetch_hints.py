@@ -38,6 +38,7 @@ _OBJDUMP_INST_RE = re.compile(r"^\s*([0-9a-fA-F]+):")
 class HintGenerationStats:
     rows_read: int = 0
     hints_written: int = 0
+    skipped_cache_hits: int = 0
     skipped_missing_pc: int = 0
     skipped_early_pc: int = 0
     malformed_rows: int = 0
@@ -138,6 +139,7 @@ def generate_hints_from_trace(
 
     rows_read = 0
     hints_written = 0
+    skipped_cache_hits = 0
     skipped_missing_pc = 0
     skipped_early_pc = 0
     malformed_rows = 0
@@ -156,8 +158,13 @@ def generate_hints_from_trace(
                 pc = int(row["instruction_pointer"], 0)
                 address = int(row["memory_address"], 0)
                 size = int(row["access_size"], 0)
+                cache_hit = int(row["cache_hit"], 0)
             except (KeyError, TypeError, ValueError):
                 malformed_rows += 1
+                continue
+
+            if cache_hit != 0:
+                skipped_cache_hits += 1
                 continue
 
             instruction_index = pc_to_index.get(pc)
@@ -181,6 +188,7 @@ def generate_hints_from_trace(
     return HintGenerationStats(
         rows_read=rows_read,
         hints_written=hints_written,
+        skipped_cache_hits=skipped_cache_hits,
         skipped_missing_pc=skipped_missing_pc,
         skipped_early_pc=skipped_early_pc,
         malformed_rows=malformed_rows,
@@ -312,6 +320,7 @@ def main() -> None:
         print(f"Lookback: fixed {args.lookback}")
     print(f"Rows read: {stats.rows_read}")
     print(f"Hints written: {stats.hints_written}")
+    print(f"Skipped cache hits: {stats.skipped_cache_hits}")
     print(f"Skipped missing PCs: {stats.skipped_missing_pc}")
     print(f"Skipped early PCs: {stats.skipped_early_pc}")
     print(f"Malformed rows: {stats.malformed_rows}")

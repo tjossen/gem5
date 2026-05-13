@@ -26,7 +26,7 @@ SimpleMemTrace::SimpleMemTrace(const SimpleMemTraceParams &params)
 
     traceStream
         << "thread_id,instruction_pointer,access_type,"
-        << "memory_address,access_size\n";
+        << "memory_address,access_size,cache_hit\n";
 
     registerExitCallback([this]() { flushTraces(); });
 }
@@ -69,7 +69,8 @@ SimpleMemTrace::traceCommit(const DynInstPtr& dynInst)
         << "0x" << std::hex << pc << std::dec << ','
         << access_type << ','
         << "0x" << std::hex << addr << std::dec << ','
-        << size << '\n';
+        << size << ','
+        << (dynInst->isCacheHit() ? 1 : 0) << '\n';
 }
 
 void

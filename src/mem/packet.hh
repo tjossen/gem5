@@ -301,7 +301,7 @@ class Packet : public Printable, public Extensible<Packet>
     enum : FlagsType
     {
         // Flags to transfer across when copying a packet
-        COPY_FLAGS             = 0x000000FF,
+        COPY_FLAGS             = 0x000600FF,
 
         // Flags that are used to create reponse packets
         RESPONDER_FLAGS        = 0x00000009,
@@ -360,7 +360,11 @@ class Packet : public Printable, public Extensible<Packet>
 
         // Signal block present to squash prefetch and cache evict packets
         // through express snoop flag
-        BLOCK_CACHED          = 0x00010000
+        BLOCK_CACHED           = 0x00010000,
+
+        // First cache lookup result for CPU-originated demand requests.
+        CACHE_HIT_VALID        = 0x00020000,
+        CACHE_HIT              = 0x00040000
     };
 
     Flags flags;
@@ -759,6 +763,16 @@ class Packet : public Printable, public Extensible<Packet>
     void setBlockCached()          { flags.set(BLOCK_CACHED); }
     bool isBlockCached() const     { return flags.isSet(BLOCK_CACHED); }
     void clearBlockCached()        { flags.clear(BLOCK_CACHED); }
+
+    void
+    setCacheHit(bool hit)
+    {
+        flags.set(CACHE_HIT_VALID);
+        flags.set(CACHE_HIT, hit);
+    }
+
+    bool cacheHitKnown() const { return flags.isSet(CACHE_HIT_VALID); }
+    bool isCacheHit() const { return flags.isSet(CACHE_HIT); }
 
     /**
      * QoS Value getter

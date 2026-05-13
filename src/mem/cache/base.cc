@@ -495,6 +495,10 @@ BaseCache::recvTimingReq(PacketPtr pkt)
     // Here we reset the timing of the packet.
     pkt->headerDelay = pkt->payloadDelay = 0;
 
+    if (pkt->isDemand() && !pkt->cacheHitKnown()) {
+        pkt->setCacheHit(satisfied);
+    }
+
     if (satisfied) {
         // notify before anything else as later handleTimingReqHit might turn
         // the packet in a response

@@ -56,6 +56,7 @@ Disassembly of section .text:
                         "access_type",
                         "memory_address",
                         "access_size",
+                        "cache_hit",
                     ],
                 )
                 writer.writeheader()
@@ -66,6 +67,7 @@ Disassembly of section .text:
                         "access_type": "R",
                         "memory_address": "0xaaa0",
                         "access_size": "8",
+                        "cache_hit": "0",
                     }
                 )
                 writer.writerow(
@@ -75,6 +77,7 @@ Disassembly of section .text:
                         "access_type": "W",
                         "memory_address": "0xbbbb",
                         "access_size": "8",
+                        "cache_hit": "0",
                     }
                 )
                 writer.writerow(
@@ -84,6 +87,7 @@ Disassembly of section .text:
                         "access_type": "R",
                         "memory_address": "0xcccc",
                         "access_size": "4",
+                        "cache_hit": "0",
                     }
                 )
                 writer.writerow(
@@ -93,6 +97,17 @@ Disassembly of section .text:
                         "access_type": "R",
                         "memory_address": "0xddd0",
                         "access_size": "16",
+                        "cache_hit": "0",
+                    }
+                )
+                writer.writerow(
+                    {
+                        "thread_id": "0",
+                        "instruction_pointer": "0x1015",
+                        "access_type": "R",
+                        "memory_address": "0xeeee",
+                        "access_size": "8",
+                        "cache_hit": "1",
                     }
                 )
 
@@ -103,10 +118,11 @@ Disassembly of section .text:
                 lookback=20,
             )
 
-            self.assertEqual(stats.rows_read, 4)
+            self.assertEqual(stats.rows_read, 5)
             self.assertEqual(stats.hints_written, 2)
             self.assertEqual(stats.skipped_missing_pc, 1)
             self.assertEqual(stats.skipped_early_pc, 1)
+            self.assertEqual(stats.skipped_cache_hits, 1)
             self.assertEqual(stats.malformed_rows, 0)
 
             with output_path.open("r", encoding="utf-8", newline="") as file:
@@ -138,6 +154,7 @@ Disassembly of section .text:
                         "access_type",
                         "memory_address",
                         "access_size",
+                        "cache_hit",
                     ],
                 )
                 writer.writeheader()
@@ -154,6 +171,7 @@ Disassembly of section .text:
                             "access_type": "R",
                             "memory_address": address,
                             "access_size": "8",
+                            "cache_hit": "0",
                         }
                     )
 
@@ -168,6 +186,7 @@ Disassembly of section .text:
 
             self.assertEqual(stats.rows_read, 4)
             self.assertEqual(stats.hints_written, 4)
+            self.assertEqual(stats.skipped_cache_hits, 0)
             self.assertEqual(stats.skipped_missing_pc, 0)
             self.assertEqual(stats.skipped_early_pc, 0)
 

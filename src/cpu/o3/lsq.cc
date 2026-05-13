@@ -1170,6 +1170,7 @@ LSQ::SingleDataRequest::recvTimingResp(PacketPtr pkt)
     assert(_numOutstandingPackets == 1);
     flags.set(Flag::Complete);
     assert(pkt == _packets.front());
+    _inst->cacheHit(pkt->isCacheHit());
     _port.completeDataAccess(pkt);
     _hasStaleTranslation = false;
     return true;
@@ -1182,9 +1183,11 @@ LSQ::SplitDataRequest::recvTimingResp(PacketPtr pkt)
     while (pktIdx < _packets.size() && pkt != _packets[pktIdx])
         pktIdx++;
     assert(pktIdx < _packets.size());
+    allPacketsCacheHit = allPacketsCacheHit && pkt->isCacheHit();
     numReceivedPackets++;
     if (numReceivedPackets == _packets.size()) {
         flags.set(Flag::Complete);
+        _inst->cacheHit(allPacketsCacheHit);
         /* Assemble packets. */
         PacketPtr resp = isLoad()
             ? Packet::createRead(_mainReq)

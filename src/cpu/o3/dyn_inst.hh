@@ -186,6 +186,7 @@ class DynInst : public ExecContext, public RefCounted
         IsStrictlyOrdered,
         ReqMade,
         MemOpDone,
+        CacheHit,
         HtmFromTransaction,
         NoCapableFU,           /// Processor does not have capability to
                                /// execute the instruction
@@ -379,6 +380,11 @@ class DynInst : public ExecContext, public RefCounted
     /** Whether or not the memory operation is done. */
     bool memOpDone() const { return instFlags[MemOpDone]; }
     void memOpDone(bool f) { instFlags[MemOpDone] = f; }
+
+    /** Whether or not this memory operation hit in the first cache. */
+    bool isCacheHit() const { return instFlags[CacheHit]; }
+    void cacheHit(bool f) { instFlags[CacheHit] = f; }
+    void setCacheHit() { instFlags[CacheHit] = true; }
 
     bool notAnInst() const { return instFlags[NotAnInst]; }
     void setNotAnInst() { instFlags[NotAnInst] = true; }

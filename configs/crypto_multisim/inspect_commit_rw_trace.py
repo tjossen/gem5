@@ -54,7 +54,8 @@ def inspect_trace(trace_file: Path, max_records: int) -> None:
                 f"{row.get('instruction_pointer', '-'):<18} "
                 f"{row.get('access_type', '-'):<4} "
                 f"{row.get('memory_address', '-'):<18} "
-                f"{row.get('access_size', '-')}"
+                f"{row.get('access_size', '-'):<6} "
+                f"{row.get('cache_hit', '-')}"
             )
 
 

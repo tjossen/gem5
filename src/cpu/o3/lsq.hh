@@ -646,6 +646,7 @@ class LSQ
       protected:
         uint32_t numFragments;
         uint32_t numReceivedPackets;
+        bool allPacketsCacheHit;
         RequestPtr _mainReq;
         PacketPtr _mainPacket;
 
@@ -658,6 +659,7 @@ class LSQ
                        nullptr),
             numFragments(0),
             numReceivedPackets(0),
+            allPacketsCacheHit(true),
             _mainReq(nullptr),
             _mainPacket(nullptr)
         {
