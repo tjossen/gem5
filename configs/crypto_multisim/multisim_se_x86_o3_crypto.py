@@ -8,8 +8,13 @@
 import csv
 import fcntl
 import os
+import sys
 import time
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from m5.objects import (
     LTAGE,
@@ -46,7 +51,12 @@ from gem5.resources.resource import BinaryResource
 from gem5.simulate.simulator import Simulator
 from gem5.utils.override import overrides
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+from generate_prefetch_hints import (
+    DEFAULT_TRACE_LINE_LOOKBACK,
+    generate_hints_for_lookbacks_from_trace,
+)
+from inspect_commit_rw_trace import find_trace_file
+
 GEM5_ROOT = SCRIPT_DIR.parent.parent
 SRC_ROOT = GEM5_ROOT.parent
 M5OUT_ROOT = GEM5_ROOT / "m5out"
@@ -87,7 +97,7 @@ BENCHMARK_ARGUMENTS = {
     "curve25519": [],
 }
 
-MAX_PARALLEL_SIMULATIONS = 16
+MAX_PARALLEL_SIMULATIONS = 3
 
 
 # --- Architecture setup ---
@@ -119,16 +129,15 @@ COMMIT_TRACE_START_INST = 0
 
 PREFETCHER_TYPES = [
     None,
-    "indirect",
-    "IMPv2",
-    "stride",
-    "tagged",
-    "ampm",
-    "bop",
-    "stems",
+    "hint",
+    # "indirect",
+    # "IMPv2",
+    # "stride",
+    # "tagged",
+    # "ampm",
+    # "bop",
+    # "stems",
 ]
-# "hint" is intentionally available to hand-selected maps but is not included
-# in PREFETCHER_TYPES yet, so the default sweep remains unchanged.
 PREFETCHER_LEVELS = ("l1i", "l1d", "l2", "l3")
 # Manually choose which cache-level combinations to sweep.
 # Each entry enables prefetcher variation only on those levels.
@@ -141,8 +150,8 @@ PREFETCHER_LEVELS = ("l1i", "l1d", "l2", "l3")
 #     ("l1i", "l1d", "l2", "l3"),
 # ]
 LEVEL_COMBINATIONS_TO_TEST = [
-    ("l1i",),
-    ("l1d",),
+    # ("l1i",),
+    # ("l1d",),
     ("l2",),
     ("l3",),
     ("l1d", "l2"),
@@ -152,16 +161,62 @@ LEVEL_COMBINATIONS_TO_TEST = [
     ("l1i", "l1d", "l2", "l3"),  # all levels
 ]
 SUMMARY_CSV_NAME = "crypto_prefetcher_sweep.csv"
-DEFAULT_HINT_LOOKBACK = 20
-DEFAULT_HINT_CSV_NAME = f"hints_pc{DEFAULT_HINT_LOOKBACK}.csv"
+DEFAULT_HINT_LOOKBACK = DEFAULT_TRACE_LINE_LOOKBACK
+# HINT_LOOKBACKS_TO_TEST = [1, 2, 3, 4, 5, 10, 20]
+HINT_LOOKBACKS_TO_TEST = range(1, 21)
+HINT_GENERATION_PARALLELISM = min(
+    MAX_PARALLEL_SIMULATIONS, len(HINT_LOOKBACKS_TO_TEST)
+)
+DEFAULT_HINT_CSV_NAME = f"hints_trace{DEFAULT_HINT_LOOKBACK}.csv"
+HINT_GENERATION_LOCK_NAME = ".crypto_hints_trace_lookbacks.lock"
 
 
-def default_hint_path(benchmark_name: str) -> Path:
+def hint_csv_name(trace_lookback: int = DEFAULT_HINT_LOOKBACK) -> str:
+    return f"hints_trace{trace_lookback}.csv"
+
+
+def default_hint_path(
+    benchmark_name: str,
+    trace_lookback: int = DEFAULT_HINT_LOOKBACK,
+) -> Path:
     return (
         M5OUT_ROOT
         / f"crypto_{benchmark_name}_commit_trace"
-        / DEFAULT_HINT_CSV_NAME
+        / hint_csv_name(trace_lookback)
     )
+
+
+def _hint_generation_lock_path() -> Path:
+    M5OUT_ROOT.mkdir(parents=True, exist_ok=True)
+    return M5OUT_ROOT / HINT_GENERATION_LOCK_NAME
+
+
+def _hint_generation_dependencies(trace_path: Path) -> list[Path]:
+    """List of files that the hint generation depends on. If any of these files are newer than the generated hint file, the hints likely need to be regenerated."""
+    return [
+        trace_path,
+        Path(__file__).resolve(),
+        SCRIPT_DIR / "generate_prefetch_hints.py",
+    ]
+
+
+def _hint_file_is_current(
+    output_path: Path, dependency_paths: list[Path]
+) -> bool:
+    """Check if the hint file exists and is newer than all dependencies. If not, it likely needs to be regenerated."""
+    if not output_path.is_file():
+        return False
+    if any(not path.is_file() for path in dependency_paths):
+        return False
+
+    output_mtime = output_path.stat().st_mtime
+    return all(
+        output_mtime >= path.stat().st_mtime for path in dependency_paths
+    )
+
+
+def _hint_generation_parallelism(job_count: int) -> int:
+    return max(1, min(HINT_GENERATION_PARALLELISM, job_count))
 
 
 class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
@@ -194,11 +249,13 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
         l3_assoc: int,
         l3_latency: int,
         benchmark_name: str | None = None,
+        hint_lookback: int = DEFAULT_HINT_LOOKBACK,
         cache_line_size: int = 64,
     ) -> None:
         super().__init__()
         self._prefetcher_map = prefetcher_map
         self._benchmark_name = benchmark_name
+        self._hint_lookback = hint_lookback
         self._l1d_size, self._l1d_assoc, self._l1d_latency = (
             l1d_size,
             l1d_assoc,
@@ -230,7 +287,7 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
             raise ValueError(
                 "HintBasedPrefetcher requires benchmark_name to resolve hints"
             )
-        return default_hint_path(self._benchmark_name)
+        return default_hint_path(self._benchmark_name, self._hint_lookback)
 
     def _get_prefetcher(self, level: str, cache: Cache | None = None, cpu=None):
         prefetcher_type = self._prefetcher_map.get(level)
@@ -417,6 +474,32 @@ def _prefetcher_slug(prefetcher_type: str | None) -> str:
     return "none" if prefetcher_type is None else prefetcher_type.lower()
 
 
+def _prefetcher_map_has_hint(prefetcher_map: dict[str, str | None]) -> bool:
+    return any(
+        prefetcher_type == "hint" for prefetcher_type in prefetcher_map.values()
+    )
+
+
+def _hint_lookbacks_for_prefetcher_map(
+    prefetcher_map: dict[str, str | None],
+) -> list[int | None]:
+    if _prefetcher_map_has_hint(prefetcher_map):
+        return list(HINT_LOOKBACKS_TO_TEST)
+    return [None]
+
+
+def _benchmark_label(
+    benchmark_name: str,
+    prefetcher_map: dict[str, str | None],
+    hint_lookback: int | None,
+) -> str:
+    if _prefetcher_map_has_hint(prefetcher_map):
+        if hint_lookback is None:
+            raise ValueError("hint prefetcher simulations require hint_lookback")
+        return f"{benchmark_name}_trace{hint_lookback}"
+    return benchmark_name
+
+
 def _make_prefetcher_map(
     prefetchers: tuple[str | None, str | None, str | None, str | None],
 ) -> dict[str, str | None]:
@@ -563,15 +646,20 @@ class CryptoPrefetcherSweepSimulator:
         binary_path: Path,
         arguments: list[str],
         prefetcher_map: dict[str, str | None],
+        hint_lookback: int | None = None,
     ) -> None:
         self._benchmark_name = benchmark_name
+        self._benchmark_label = _benchmark_label(
+            benchmark_name, prefetcher_map, hint_lookback
+        )
+        self._hint_lookback = hint_lookback
         self._binary_path = binary_path
         self._arguments = arguments
         self._prefetcher_map = prefetcher_map
         self._outdir = None
         self._id = (
             "crypto_"
-            + benchmark_name
+            + self._benchmark_label
             + "__"
             + "_".join(
                 f"{level}-{_prefetcher_slug(prefetcher_map[level])}"
@@ -596,6 +684,11 @@ class CryptoPrefetcherSweepSimulator:
             **{f"l2_{k}": v for k, v in L2_CONFIG.items()},
             **{f"l3_{k}": v for k, v in L3_CONFIG.items()},
             benchmark_name=self._benchmark_name,
+            hint_lookback=(
+                self._hint_lookback
+                if self._hint_lookback is not None
+                else DEFAULT_HINT_LOOKBACK
+            ),
             cache_line_size=CACHE_LINE_SIZE,
         )
         board = SimpleBoard(
@@ -629,7 +722,7 @@ class CryptoPrefetcherSweepSimulator:
                 m5.stats.dump()
                 _record_summary_row(
                     stats_path=self._outdir / "stats.txt",
-                    benchmark_name=self._benchmark_name,
+                    benchmark_name=self._benchmark_label,
                     prefetcher_map=self._prefetcher_map,
                 )
             except Exception as summary_error:
@@ -654,12 +747,117 @@ def _resolve_binary_path(candidates):
     )
 
 
+def _resolve_hint_generation_inputs(
+    benchmark_names: list[str],
+    hint_lookbacks: list[int] = HINT_LOOKBACKS_TO_TEST,
+) -> list[tuple[str, Path, Path, Path, int]]:
+    resolved_inputs: list[tuple[str, Path, Path, Path, int]] = []
+    errors: list[str] = []
+
+    for benchmark_name in benchmark_names:
+        trace_path = None
+        binary_path = None
+        try:
+            trace_path = find_trace_file(benchmark_name).resolve()
+        except FileNotFoundError as error:
+            errors.append(str(error))
+
+        try:
+            binary_path = _resolve_binary_path(
+                BENCHMARK_PATH_CANDIDATES[benchmark_name]
+            )
+        except (KeyError, FileNotFoundError) as error:
+            errors.append(str(error))
+
+        if trace_path is not None and binary_path is not None:
+            for hint_lookback in hint_lookbacks:
+                resolved_inputs.append(
+                    (
+                        benchmark_name,
+                        trace_path,
+                        binary_path,
+                        default_hint_path(benchmark_name, hint_lookback),
+                        hint_lookback,
+                    )
+                )
+
+    if errors:
+        raise FileNotFoundError(
+            "Cannot generate hint prefetcher inputs before running the "
+            "sweep. Generate commit traces first with "
+            "multisim_se_x86_o3_crypto_commit_trace.py.\n"
+            + "\n".join(f"  - {error}" for error in errors)
+        )
+
+    return resolved_inputs
+
+
+def _generate_hint_files_for_benchmarks(benchmark_names: list[str]) -> None:
+    if "hint" not in PREFETCHER_TYPES:
+        return
+
+    hint_inputs = _resolve_hint_generation_inputs(
+        benchmark_names, HINT_LOOKBACKS_TO_TEST
+    )
+    lock_path = _hint_generation_lock_path()
+
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        print(
+            "Generating hint prefetcher inputs for enabled crypto benchmarks "
+            f"(trace-line lookbacks={HINT_LOOKBACKS_TO_TEST})"
+        )
+        stale_hint_files = {}
+        for (
+            benchmark_name,
+            trace_path,
+            binary_path,
+            output_path,
+            hint_lookback,
+        ) in hint_inputs:
+            dependencies = _hint_generation_dependencies(trace_path)
+            if _hint_file_is_current(output_path, dependencies):
+                print(
+                    f"  {benchmark_name} trace{hint_lookback}: "
+                    f"hints are current at {output_path}"
+                )
+                continue
+            key = (benchmark_name, trace_path)
+            stale_hint_files.setdefault(key, {})[hint_lookback] = output_path
+
+        for (benchmark_name, trace_path), output_paths in stale_hint_files.items():
+            hint_lookbacks = list(output_paths)
+            max_workers = _hint_generation_parallelism(len(hint_lookbacks))
+            print(
+                f"  {benchmark_name}: generating {len(hint_lookbacks)} "
+                f"stale hint files with {max_workers} worker processes"
+            )
+            results = generate_hints_for_lookbacks_from_trace(
+                trace_path=trace_path,
+                trace_lookbacks=hint_lookbacks,
+                output_path_for_lookback=(
+                    lambda lookback, output_paths=output_paths: output_paths[lookback]
+                ),
+                max_workers=max_workers,
+            )
+            for result in results:
+                print(
+                    f"  {benchmark_name} trace{result.trace_lookback}: "
+                    f"wrote {result.stats.hints_written} hints from "
+                    f"{result.stats.rows_read} trace rows to "
+                    f"{result.output_path}"
+                )
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def main() -> None:
     active_benchmarks = [
         name for name, enabled in ENABLED_BENCHMARKS.items() if enabled
     ]
     if not active_benchmarks:
         raise RuntimeError("At least one benchmark must be enabled.")
+
+    _generate_hint_files_for_benchmarks(active_benchmarks)
 
     simulator_specs = []
     seen_specs = set()
@@ -668,21 +866,28 @@ def main() -> None:
             for prefetcher_map in _iter_prefetcher_maps_for_level_combination(
                 level_combination
             ):
-                key = (
-                    benchmark_name,
-                    tuple(
-                        prefetcher_map[level] for level in PREFETCHER_LEVELS
-                    ),
-                )
-                if key not in seen_specs:
-                    seen_specs.add(key)
-                    simulator_specs.append((benchmark_name, prefetcher_map))
+                for hint_lookback in _hint_lookbacks_for_prefetcher_map(
+                    prefetcher_map
+                ):
+                    key = (
+                        benchmark_name,
+                        tuple(
+                            prefetcher_map[level]
+                            for level in PREFETCHER_LEVELS
+                        ),
+                        hint_lookback,
+                    )
+                    if key not in seen_specs:
+                        seen_specs.add(key)
+                        simulator_specs.append(
+                            (benchmark_name, prefetcher_map, hint_lookback)
+                        )
 
     multisim.set_num_processes(
         min(MAX_PARALLEL_SIMULATIONS, len(simulator_specs))
     )
 
-    for benchmark_name, prefetcher_map in simulator_specs:
+    for benchmark_name, prefetcher_map, hint_lookback in simulator_specs:
         multisim.add_simulator(
             CryptoPrefetcherSweepSimulator(
                 benchmark_name=benchmark_name,
@@ -691,9 +896,10 @@ def main() -> None:
                 ),
                 arguments=BENCHMARK_ARGUMENTS.get(benchmark_name, []),
                 prefetcher_map=prefetcher_map,
+                hint_lookback=hint_lookback,
             )
         )
 
 
-if __name__ == "__m5_main__":
+if __name__ in {"__m5_main__", "gem5target"}:
     main()

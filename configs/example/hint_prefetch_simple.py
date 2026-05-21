@@ -13,7 +13,7 @@ DEFAULT_BINARY = (
     / "crypto-programs/test_openssl/sha256/test_ossl_sha256_baseline"
 )
 DEFAULT_HINTS_FILE = (
-    GEM5_ROOT / "m5out/crypto_sha256_commit_trace/hints_pc20.csv"
+    GEM5_ROOT / "m5out/crypto_sha256_commit_trace/hints_trace5.csv"
 )
 HELLO_BINARY = (
     GEM5_ROOT / "tests/test-progs/hello/bin/x86/linux/hello"

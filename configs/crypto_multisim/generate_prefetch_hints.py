@@ -5,33 +5,27 @@ Generate chronological prefetch hints from SimpleMemTrace commit traces.
 Examples:
   python3 configs/crypto_multisim/generate_prefetch_hints.py sha256
   python3 configs/crypto_multisim/generate_prefetch_hints.py sha256 \
-      --lookback-min 5 --lookback-max 40 --lookback-seed 1
+      --trace-lookback 5
   python3 configs/crypto_multisim/generate_prefetch_hints.py \
-      --trace /path/to/commit_rw_trace.csv --binary /path/to/binary
+      --trace /path/to/commit_rw_trace.csv --output /path/to/hints_trace5.csv
 """
 
 import argparse
-import ast
 import csv
-import random
-import re
-import subprocess
+import os
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from inspect_commit_rw_trace import find_trace_file
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 GEM5_ROOT = SCRIPT_DIR.parent.parent
-SRC_ROOT = GEM5_ROOT.parent
-BASE_CONFIG = SCRIPT_DIR / "multisim_se_x86_o3_crypto.py"
 
-DEFAULT_TRACE_LOOKBACK = 20
-DEFAULT_OBJDUMP = "objdump"
-
-_OBJDUMP_INST_RE = re.compile(r"^\s*([0-9a-fA-F]+):")
+DEFAULT_TRACE_LINE_LOOKBACK = 5
 
 
 @dataclass(frozen=True)
@@ -44,99 +38,33 @@ class HintGenerationStats:
     malformed_rows: int = 0
 
 
+@dataclass(frozen=True)
+class HintGenerationJob:
+    trace_path: Path
+    output_path: Path
+    trace_lookback: int
+
+
+@dataclass(frozen=True)
+class HintGenerationResult:
+    trace_lookback: int
+    output_path: Path
+    stats: HintGenerationStats
+
+
 def _format_hex(value: int) -> str:
     return f"0x{value:x}"
 
 
-def _literal_assignment(module_path: Path, name: str):
-    tree = ast.parse(module_path.read_text(encoding="utf-8"))
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == name:
-                    return ast.literal_eval(node.value)
-    raise KeyError(f"{name} not found in {module_path}")
-
-
-def benchmark_path_candidates() -> dict[str, list[str]]:
-    return _literal_assignment(BASE_CONFIG, "BENCHMARK_PATH_CANDIDATES")
-
-
-def resolve_binary_path(benchmark_name: str) -> Path:
-    candidates = benchmark_path_candidates()
-    if benchmark_name not in candidates:
-        known = ", ".join(sorted(candidates))
-        raise KeyError(
-            f"Unknown benchmark {benchmark_name!r}. Known benchmarks: {known}"
-        )
-
-    checked: list[Path] = []
-    for candidate in candidates[benchmark_name]:
-        path = Path(candidate)
-        if not path.is_absolute():
-            path = SRC_ROOT / path
-        resolved = path.resolve()
-        checked.append(resolved)
-        if resolved.is_file() and resolved.stat().st_mode & 0o111:
-            return resolved
-
-    raise FileNotFoundError(
-        "Could not find an executable benchmark binary. Checked:\n"
-        + "\n".join(f"  - {path}" for path in checked)
-    )
-
-
-def parse_objdump_instruction_pcs_from_text(objdump_text: str) -> list[int]:
-    pcs: list[int] = []
-    for line in objdump_text.splitlines():
-        match = _OBJDUMP_INST_RE.match(line)
-        if match is not None:
-            pcs.append(int(match.group(1), 16))
-    return pcs
-
-
-def disassemble_instruction_pcs(
-    binary_path: Path,
-    objdump: str = DEFAULT_OBJDUMP,
-) -> list[int]:
-    result = subprocess.run(
-        [objdump, "-d", "--no-show-raw-insn", str(binary_path)],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    return parse_objdump_instruction_pcs_from_text(result.stdout)
-
-
 def generate_hints_from_trace(
     trace_path: Path,
-    instruction_pcs: Iterable[int],
     output_path: Path,
-    lookback: int = DEFAULT_TRACE_LOOKBACK,
-    lookback_min: int | None = None,
-    lookback_max: int | None = None,
-    lookback_seed: int = 1,
+    trace_lookback: int = DEFAULT_TRACE_LINE_LOOKBACK,
 ) -> HintGenerationStats:
-    pcs_by_index = list(instruction_pcs)
-    pc_to_index = {pc: index for index, pc in enumerate(pcs_by_index)}
-    use_random_lookback = lookback_min is not None or lookback_max is not None
+    if trace_lookback < 0:
+        raise ValueError("trace_lookback must be non-negative")
 
-    if use_random_lookback:
-        if lookback_min is None or lookback_max is None:
-            raise ValueError(
-                "Both lookback_min and lookback_max are required for "
-                "random lookback"
-            )
-        if lookback_min < 0 or lookback_max < 0:
-            raise ValueError("Random lookback bounds must be non-negative")
-        if lookback_min > lookback_max:
-            raise ValueError("lookback_min must be <= lookback_max")
-        lookback_rng = random.Random(lookback_seed)
-    else:
-        if lookback < 0:
-            raise ValueError("lookback must be non-negative")
-        lookback_rng = None
-
+    prior_pcs: deque[int | None] = deque(maxlen=max(trace_lookback, 1))
     rows_read = 0
     hints_written = 0
     skipped_cache_hits = 0
@@ -161,29 +89,30 @@ def generate_hints_from_trace(
                 cache_hit = int(row["cache_hit"], 0)
             except (KeyError, TypeError, ValueError):
                 malformed_rows += 1
+                prior_pcs.append(None)
                 continue
 
             if cache_hit != 0:
                 skipped_cache_hits += 1
+                prior_pcs.append(pc)
                 continue
 
-            instruction_index = pc_to_index.get(pc)
-            if instruction_index is None:
-                skipped_missing_pc += 1
-                continue
-
-            row_lookback = (
-                lookback_rng.randint(lookback_min, lookback_max)
-                if lookback_rng is not None
-                else lookback
-            )
-            if instruction_index < row_lookback:
+            if trace_lookback == 0:
+                hint_pc = pc
+            elif len(prior_pcs) < trace_lookback:
                 skipped_early_pc += 1
+                prior_pcs.append(pc)
                 continue
+            else:
+                hint_pc = prior_pcs[0]
+                if hint_pc is None:
+                    skipped_missing_pc += 1
+                    prior_pcs.append(pc)
+                    continue
 
-            hint_pc = pcs_by_index[instruction_index - row_lookback]
             writer.writerow([_format_hex(hint_pc), _format_hex(address), size])
             hints_written += 1
+            prior_pcs.append(pc)
 
     return HintGenerationStats(
         rows_read=rows_read,
@@ -197,20 +126,70 @@ def generate_hints_from_trace(
 
 def default_output_path(
     trace_path: Path,
-    lookback: int,
-    lookback_min: int | None = None,
-    lookback_max: int | None = None,
-    lookback_seed: int = 1,
+    trace_lookback: int = DEFAULT_TRACE_LINE_LOOKBACK,
 ) -> Path:
-    if lookback_min is not None or lookback_max is not None:
-        return (
-            trace_path.parent
-            / f"hints_pc{lookback_min}-{lookback_max}_seed{lookback_seed}.csv"
+    return trace_path.parent / f"hints_trace{trace_lookback}.csv"
+
+
+def _generate_hints_for_lookback_job(
+    job: HintGenerationJob,
+) -> HintGenerationResult:
+    stats = generate_hints_from_trace(
+        trace_path=job.trace_path,
+        output_path=job.output_path,
+        trace_lookback=job.trace_lookback,
+    )
+    return HintGenerationResult(
+        trace_lookback=job.trace_lookback,
+        output_path=job.output_path,
+        stats=stats,
+    )
+
+
+def _default_parallelism(job_count: int) -> int:
+    return max(1, min(job_count, os.cpu_count() or 1))
+
+
+def generate_hints_for_lookbacks_from_trace(
+    trace_path: Path,
+    trace_lookbacks: Iterable[int],
+    output_path_for_lookback: Callable[[int], Path] | None = None,
+    max_workers: int | None = None,
+    executor_class=ProcessPoolExecutor,
+) -> list[HintGenerationResult]:
+    lookbacks = list(trace_lookbacks)
+    if any(lookback < 0 for lookback in lookbacks):
+        raise ValueError("trace_lookbacks must be non-negative")
+    if not lookbacks:
+        return []
+
+    def output_path(lookback: int) -> Path:
+        if output_path_for_lookback is not None:
+            return output_path_for_lookback(lookback)
+        return default_output_path(trace_path, lookback)
+
+    jobs = [
+        HintGenerationJob(
+            trace_path=trace_path,
+            output_path=output_path(lookback),
+            trace_lookback=lookback,
         )
-    return trace_path.parent / f"hints_pc{lookback}.csv"
+        for lookback in lookbacks
+    ]
+    worker_count = (
+        _default_parallelism(len(jobs))
+        if max_workers is None
+        else max(1, min(max_workers, len(jobs)))
+    )
+
+    if worker_count == 1:
+        return [_generate_hints_for_lookback_job(job) for job in jobs]
+
+    with executor_class(max_workers=worker_count) as executor:
+        return list(executor.map(_generate_hints_for_lookback_job, jobs))
 
 
-def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path]:
     if args.trace is not None:
         trace_path = args.trace.resolve()
     elif args.target is not None:
@@ -218,25 +197,12 @@ def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     else:
         raise ValueError("Provide a benchmark target or --trace.")
 
-    if args.binary is not None:
-        binary_path = args.binary.resolve()
-    elif args.target is not None:
-        binary_path = resolve_binary_path(args.target)
-    else:
-        raise ValueError("Provide --binary when using --trace without a benchmark.")
-
     output_path = (
         args.output.resolve()
         if args.output is not None
-        else default_output_path(
-            trace_path,
-            args.lookback,
-            args.lookback_min,
-            args.lookback_max,
-            args.lookback_seed,
-        )
+        else default_output_path(trace_path, args.trace_lookback)
     )
-    return trace_path, binary_path, output_path
+    return trace_path, output_path
 
 
 def main() -> None:
@@ -249,75 +215,28 @@ def main() -> None:
         help="Benchmark name matching configs/crypto_multisim, e.g. sha256",
     )
     parser.add_argument("--trace", type=Path, help="Explicit trace CSV path")
-    parser.add_argument("--binary", type=Path, help="Explicit benchmark binary")
     parser.add_argument("--output", type=Path, help="Output hint CSV path")
     parser.add_argument(
-        "--lookback",
+        "--trace-lookback",
         type=int,
-        default=DEFAULT_TRACE_LOOKBACK,
-        help="Number of static objdump instructions to look back",
-    )
-    parser.add_argument(
-        "--lookback-min",
-        type=int,
-        help="Minimum static objdump instructions to look back per row",
-    )
-    parser.add_argument(
-        "--lookback-max",
-        type=int,
-        help="Maximum static objdump instructions to look back per row",
-    )
-    parser.add_argument(
-        "--lookback-seed",
-        type=int,
-        default=1,
-        help="Seed for random lookback selection",
-    )
-    parser.add_argument(
-        "--objdump",
-        default=DEFAULT_OBJDUMP,
-        help="objdump executable to use",
+        default=DEFAULT_TRACE_LINE_LOOKBACK,
+        help="Number of prior trace CSV rows to look back",
     )
     args = parser.parse_args()
 
-    random_lookback = (
-        args.lookback_min is not None or args.lookback_max is not None
-    )
-    if random_lookback:
-        if args.lookback_min is None or args.lookback_max is None:
-            raise ValueError(
-                "--lookback-min and --lookback-max must be provided together"
-            )
-        if args.lookback_min < 0 or args.lookback_max < 0:
-            raise ValueError("--lookback-min/max must be non-negative")
-        if args.lookback_min > args.lookback_max:
-            raise ValueError("--lookback-min must be <= --lookback-max")
-    elif args.lookback < 0:
-        raise ValueError("--lookback must be non-negative")
+    if args.trace_lookback < 0:
+        raise ValueError("--trace-lookback must be non-negative")
 
-    trace_path, binary_path, output_path = _resolve_inputs(args)
-    instruction_pcs = disassemble_instruction_pcs(binary_path, args.objdump)
+    trace_path, output_path = _resolve_inputs(args)
     stats = generate_hints_from_trace(
         trace_path=trace_path,
-        instruction_pcs=instruction_pcs,
         output_path=output_path,
-        lookback=args.lookback,
-        lookback_min=args.lookback_min,
-        lookback_max=args.lookback_max,
-        lookback_seed=args.lookback_seed,
+        trace_lookback=args.trace_lookback,
     )
 
     print(f"Trace: {trace_path}")
-    print(f"Binary: {binary_path}")
     print(f"Output: {output_path}")
-    if random_lookback:
-        print(
-            "Lookback: "
-            f"random [{args.lookback_min}, {args.lookback_max}] "
-            f"seed={args.lookback_seed}"
-        )
-    else:
-        print(f"Lookback: fixed {args.lookback}")
+    print(f"Trace-line lookback: fixed {args.trace_lookback}")
     print(f"Rows read: {stats.rows_read}")
     print(f"Hints written: {stats.hints_written}")
     print(f"Skipped cache hits: {stats.skipped_cache_hits}")
