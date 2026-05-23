@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate chronological prefetch hints from SimpleMemTrace commit traces.
+Generate chronological prefetch hints from L1D cache access traces.
 
 Examples:
   python3 configs/crypto_multisim/generate_prefetch_hints.py sha256
@@ -25,7 +25,7 @@ from inspect_commit_rw_trace import find_trace_file
 SCRIPT_DIR = Path(__file__).resolve().parent
 GEM5_ROOT = SCRIPT_DIR.parent.parent
 
-DEFAULT_TRACE_LINE_LOOKBACK = 5
+DEFAULT_TRACE_LINE_LOOKBACK = 16
 
 
 @dataclass(frozen=True)

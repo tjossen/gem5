@@ -29,6 +29,7 @@ from m5.objects import (
     IMPv2Prefetcher,
     IndirectMemoryPrefetcher,
     L2XBar,
+    SimpleCacheTrace,
     STeMSPrefetcher,
     StridePrefetcher,
     SystemXBar,
@@ -97,7 +98,7 @@ BENCHMARK_ARGUMENTS = {
     "curve25519": [],
 }
 
-MAX_PARALLEL_SIMULATIONS = 3
+MAX_PARALLEL_SIMULATIONS = 16
 
 
 # --- Architecture setup ---
@@ -150,8 +151,8 @@ PREFETCHER_LEVELS = ("l1i", "l1d", "l2", "l3")
 #     ("l1i", "l1d", "l2", "l3"),
 # ]
 LEVEL_COMBINATIONS_TO_TEST = [
-    # ("l1i",),
-    # ("l1d",),
+    ("l1i",),
+    ("l1d",),
     ("l2",),
     ("l3",),
     ("l1d", "l2"),
@@ -163,7 +164,7 @@ LEVEL_COMBINATIONS_TO_TEST = [
 SUMMARY_CSV_NAME = "crypto_prefetcher_sweep.csv"
 DEFAULT_HINT_LOOKBACK = DEFAULT_TRACE_LINE_LOOKBACK
 # HINT_LOOKBACKS_TO_TEST = [1, 2, 3, 4, 5, 10, 20]
-HINT_LOOKBACKS_TO_TEST = range(1, 21)
+HINT_LOOKBACKS_TO_TEST = range(1, 31)
 HINT_GENERATION_PARALLELISM = min(
     MAX_PARALLEL_SIMULATIONS, len(HINT_LOOKBACKS_TO_TEST)
 )
@@ -216,7 +217,9 @@ def _hint_file_is_current(
 
 
 def _hint_generation_parallelism(job_count: int) -> int:
-    return max(1, min(HINT_GENERATION_PARALLELISM, job_count))
+    my_max = HINT_GENERATION_PARALLELISM
+    my_max = 16
+    return max(1, min(my_max, job_count))
 
 
 class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
@@ -251,11 +254,14 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
         benchmark_name: str | None = None,
         hint_lookback: int = DEFAULT_HINT_LOOKBACK,
         cache_line_size: int = 64,
+        l1d_trace_file: str | None = None,
     ) -> None:
         super().__init__()
         self._prefetcher_map = prefetcher_map
         self._benchmark_name = benchmark_name
         self._hint_lookback = hint_lookback
+        self._l1d_trace_file = l1d_trace_file
+        self._l1d_caches = []
         self._l1d_size, self._l1d_assoc, self._l1d_latency = (
             l1d_size,
             l1d_assoc,
@@ -418,6 +424,11 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
                 tgts_per_mshr=20,
                 writeback_clean=False,
             )
+            self._l1d_caches.append(l1dcache)
+            if self._l1d_trace_file is not None:
+                l1dcache.traceListener = SimpleCacheTrace(
+                    traceFile=self._l1d_trace_file
+                )
             l1d_prefetcher = self._get_prefetcher("l1d", l1dcache, cpu)
             if l1d_prefetcher is not None:
                 l1dcache.prefetcher = l1d_prefetcher
@@ -500,6 +511,25 @@ def _benchmark_label(
     return benchmark_name
 
 
+def _simulation_id(
+    benchmark_name: str,
+    prefetcher_map: dict[str, str | None],
+    hint_lookback: int | None,
+) -> str:
+    benchmark_label = _benchmark_label(
+        benchmark_name, prefetcher_map, hint_lookback
+    )
+    return (
+        "crypto_"
+        + benchmark_label
+        + "__"
+        + "_".join(
+            f"{level}-{_prefetcher_slug(prefetcher_map[level])}"
+            for level in PREFETCHER_LEVELS
+        )
+    )
+
+
 def _make_prefetcher_map(
     prefetchers: tuple[str | None, str | None, str | None, str | None],
 ) -> dict[str, str | None]:
@@ -535,6 +565,31 @@ def _iter_prefetcher_maps_for_level_combination(
 def _summary_path() -> Path:
     M5OUT_ROOT.mkdir(parents=True, exist_ok=True)
     return M5OUT_ROOT / SUMMARY_CSV_NAME
+
+
+def _completed_summary_ids() -> set[str]:
+    summary_file = _summary_path()
+    if not summary_file.is_file():
+        return set()
+
+    completed_ids = set()
+    with summary_file.open("r", encoding="utf-8", newline="") as csv_file:
+        fcntl.flock(csv_file, fcntl.LOCK_SH)
+        try:
+            reader = csv.DictReader(csv_file)
+            if (
+                reader.fieldnames is None
+                or "simulation_id" not in reader.fieldnames
+            ):
+                return set()
+            for row in reader:
+                simulation_id = (row.get("simulation_id") or "").strip()
+                if simulation_id:
+                    completed_ids.add(simulation_id)
+        finally:
+            fcntl.flock(csv_file, fcntl.LOCK_UN)
+
+    return completed_ids
 
 
 def _extract_stat_value(
@@ -657,14 +712,8 @@ class CryptoPrefetcherSweepSimulator:
         self._arguments = arguments
         self._prefetcher_map = prefetcher_map
         self._outdir = None
-        self._id = (
-            "crypto_"
-            + self._benchmark_label
-            + "__"
-            + "_".join(
-                f"{level}-{_prefetcher_slug(prefetcher_map[level])}"
-                for level in PREFETCHER_LEVELS
-            )
+        self._id = _simulation_id(
+            self._benchmark_name, self._prefetcher_map, self._hint_lookback
         )
 
     def get_id(self):
@@ -859,6 +908,8 @@ def main() -> None:
 
     _generate_hint_files_for_benchmarks(active_benchmarks)
 
+    completed_simulation_ids = _completed_summary_ids()
+    skipped_completed = 0
     simulator_specs = []
     seen_specs = set()
     for benchmark_name in active_benchmarks:
@@ -877,11 +928,29 @@ def main() -> None:
                         ),
                         hint_lookback,
                     )
-                    if key not in seen_specs:
-                        seen_specs.add(key)
-                        simulator_specs.append(
-                            (benchmark_name, prefetcher_map, hint_lookback)
-                        )
+                    if key in seen_specs:
+                        continue
+                    seen_specs.add(key)
+
+                    simulation_id = _simulation_id(
+                        benchmark_name, prefetcher_map, hint_lookback
+                    )
+                    if simulation_id in completed_simulation_ids:
+                        skipped_completed += 1
+                        continue
+
+                    simulator_specs.append(
+                        (benchmark_name, prefetcher_map, hint_lookback)
+                    )
+
+    if skipped_completed:
+        print(
+            f"Resume: skipping {skipped_completed} simulations already "
+            f"present in {_summary_path()}"
+        )
+    if not simulator_specs:
+        print("Resume: no remaining simulations to schedule.")
+        return
 
     multisim.set_num_processes(
         min(MAX_PARALLEL_SIMULATIONS, len(simulator_specs))

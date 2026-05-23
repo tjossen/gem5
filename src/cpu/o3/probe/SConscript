@@ -44,6 +44,9 @@ if env['CONF']['BUILD_ISA']:
     SimObject('SimpleMemTrace.py', sim_objects=['SimpleMemTrace'])
     Source('simple_mem_trace.cc')
     DebugFlag('SimpleMemTrace')
+    SimObject('SimpleCacheTrace.py', sim_objects=['SimpleCacheTrace'])
+    Source('simple_cache_trace.cc')
+    DebugFlag('SimpleCacheTrace')
 
     if env['CONF']['HAVE_PROTOBUF']:
         SimObject(

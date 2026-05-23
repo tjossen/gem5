@@ -42,6 +42,7 @@ def _install_import_stubs():
         "IMPv2Prefetcher",
         "IndirectMemoryPrefetcher",
         "L2XBar",
+        "SimpleCacheTrace",
         "STeMSPrefetcher",
         "StridePrefetcher",
         "SystemXBar",
@@ -169,6 +170,85 @@ def _load_config_module():
 
 
 class CryptoMultisimHintGenerationTest(unittest.TestCase):
+    def test_l1d_trace_listener_attaches_when_trace_file_is_configured(self):
+        config = _load_config_module()
+
+        class FakeCache(SimpleNamespace):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.cpu_side = None
+                self.mem_side = None
+
+        class FakeTrace(SimpleNamespace):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+
+        class FakeXBar(SimpleNamespace):
+            def __init__(self, **_kwargs):
+                super().__init__(cpu_side_ports=object(), mem_side_ports=object())
+
+        class FakeBadAddr(SimpleNamespace):
+            def __init__(self):
+                super().__init__(pio=object())
+
+        class FakeNode:
+            def add_child(self, *_args, **_kwargs):
+                return self
+
+        class FakeCore:
+            def connect_icache(self, _port):
+                pass
+
+            def connect_dcache(self, _port):
+                pass
+
+            def connect_walker_ports(self, _itb, _dtb):
+                pass
+
+            def connect_interrupt(self, _pio, _int_req):
+                pass
+
+        class FakeProcessor:
+            def get_cores(self):
+                return [FakeCore()]
+
+        class FakeBoard(SimpleNamespace):
+            def __init__(self):
+                super().__init__(cache_line_size=None)
+
+            def connect_system_port(self, _port):
+                pass
+
+            def get_mem_ports(self):
+                return [(None, object())]
+
+            def get_processor(self):
+                return FakeProcessor()
+
+        config.Cache = FakeCache
+        config.SimpleCacheTrace = FakeTrace
+        config.SystemXBar = FakeXBar
+        config.L2XBar = FakeXBar
+        config.BadAddr = FakeBadAddr
+
+        hierarchy = config.ThreeLevelClassicCacheHierarchy(
+            prefetcher_map={level: None for level in config.PREFETCHER_LEVELS},
+            l1d_trace_file="commit_rw_trace.csv",
+            **{f"l1d_{key}": value for key, value in config.L1D_CONFIG.items()},
+            **{f"l1i_{key}": value for key, value in config.L1I_CONFIG.items()},
+            **{f"l2_{key}": value for key, value in config.L2_CONFIG.items()},
+            **{f"l3_{key}": value for key, value in config.L3_CONFIG.items()},
+        )
+        hierarchy.add_root_child = lambda *_args, **_kwargs: FakeNode()
+
+        hierarchy.incorporate_cache(FakeBoard())
+
+        self.assertEqual(len(hierarchy._l1d_caches), 1)
+        self.assertEqual(
+            hierarchy._l1d_caches[0].traceListener.traceFile,
+            "commit_rw_trace.csv",
+        )
+
     def test_generates_hints_for_each_configured_lookback(self):
         config = _load_config_module()
         generation_calls = []
@@ -213,8 +293,8 @@ class CryptoMultisimHintGenerationTest(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             config._generate_hint_files_for_benchmarks(["sha256"])
 
-        self.assertEqual(config.DEFAULT_HINT_LOOKBACK, 5)
-        self.assertEqual(config.DEFAULT_HINT_CSV_NAME, "hints_trace5.csv")
+        self.assertEqual(config.DEFAULT_HINT_LOOKBACK, 15)
+        self.assertEqual(config.DEFAULT_HINT_CSV_NAME, "hints_trace15.csv")
         self.assertEqual(
             generation_calls,
             [
@@ -311,7 +391,7 @@ class CryptoMultisimHintGenerationTest(unittest.TestCase):
                 {
                     "trace_path": trace_path,
                     "trace_lookbacks": [1, 5, 20],
-                    "max_workers": 2,
+                    "max_workers": 3,
                 }
             ],
         )
@@ -405,6 +485,7 @@ class CryptoMultisimHintGenerationTest(unittest.TestCase):
         config.BENCHMARK_PATH_CANDIDATES = {"sha256": ["sha256_binary"]}
         config.BENCHMARK_ARGUMENTS = {"sha256": []}
         config._generate_hint_files_for_benchmarks = lambda benchmark_names: None
+        config._completed_summary_ids = lambda: set()
         config._resolve_binary_path = lambda candidates: Path("/tmp/sha256_binary")
         config.multisim.add_simulator = simulators.append
         config.multisim.set_num_processes = lambda *_args, **_kwargs: None
@@ -416,6 +497,47 @@ class CryptoMultisimHintGenerationTest(unittest.TestCase):
             [
                 "crypto_sha256__l1i-none_l1d-none_l2-none_l3-none",
                 "crypto_sha256_trace1__l1i-none_l1d-none_l2-hint_l3-none",
+                "crypto_sha256_trace5__l1i-none_l1d-none_l2-hint_l3-none",
+            ],
+        )
+
+    def test_main_skips_simulators_already_present_in_summary_csv(self):
+        config = _load_config_module()
+        simulators = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary_path = Path(temp_dir) / "crypto_prefetcher_sweep.csv"
+            summary_path.write_text(
+                "simulation_id,benchmark,l1i_prefetcher,l1d_prefetcher,"
+                "l2_prefetcher,l3_prefetcher,ipc,sim_seconds,sim_insts,"
+                "sim_cycles\n"
+                "crypto_sha256_trace1__l1i-none_l1d-none_l2-hint_l3-none,"
+                "sha256_trace1,none,none,hint,none,1.0,0.1,10,10\n",
+                encoding="utf-8",
+            )
+
+            config.ENABLED_BENCHMARKS = {"sha256": True}
+            config.PREFETCHER_TYPES = ["hint"]
+            config.LEVEL_COMBINATIONS_TO_TEST = [("l2",)]
+            config.HINT_LOOKBACKS_TO_TEST = [1, 5]
+            config.BENCHMARK_PATH_CANDIDATES = {"sha256": ["sha256_binary"]}
+            config.BENCHMARK_ARGUMENTS = {"sha256": []}
+            config._summary_path = lambda: summary_path
+            config._generate_hint_files_for_benchmarks = (
+                lambda benchmark_names: None
+            )
+            config._resolve_binary_path = (
+                lambda candidates: Path("/tmp/sha256_binary")
+            )
+            config.multisim.add_simulator = simulators.append
+            config.multisim.set_num_processes = lambda *_args, **_kwargs: None
+
+            with redirect_stdout(io.StringIO()):
+                config.main()
+
+        self.assertEqual(
+            [simulator.get_id() for simulator in simulators],
+            [
                 "crypto_sha256_trace5__l1i-none_l1d-none_l2-hint_l3-none",
             ],
         )

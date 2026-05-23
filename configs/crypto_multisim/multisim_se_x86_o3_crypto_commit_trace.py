@@ -1,14 +1,13 @@
 # Copyright (c) 2026
 #
-# MultiSim SE benchmark runner for crypto workloads with commit-stage memory
-# trace capture.
+# MultiSim SE benchmark runner for crypto workloads with L1D cache-access
+# hit/miss trace capture.
 #
 # Run from the gem5 root directory:
 #   build/X86/gem5.opt -m gem5.utils.multisim configs/crypto_multisim/multisim_se_x86_o3_crypto_commit_trace.py
 
 from pathlib import Path
 
-from m5.objects import SimpleMemTrace
 from m5.util import addToPath
 
 import gem5.utils.multisim as multisim
@@ -60,12 +59,9 @@ class CryptoCommitTraceCaptureSimulator:
             **{f"l2_{k}": v for k, v in base.L2_CONFIG.items()},
             **{f"l3_{k}": v for k, v in base.L3_CONFIG.items()},
             cache_line_size=base.CACHE_LINE_SIZE,
+            l1d_trace_file=COMMIT_TRACE_FILE,
         )
         cpu = base._create_x86_o3_cpu()
-        cpu.traceListener = SimpleMemTrace(
-            traceFile=COMMIT_TRACE_FILE,
-            startTraceInst=base.COMMIT_TRACE_START_INST,
-        )
         board = SimpleBoard(
             clk_freq=base.CLOCK_FREQUENCY,
             processor=BaseCPUProcessor(

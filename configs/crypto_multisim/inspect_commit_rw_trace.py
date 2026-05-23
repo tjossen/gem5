@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Inspect commit-stage read/write CSV traces emitted by SimpleMemTrace.
+Inspect L1D cache-access read/write CSV traces.
 
 Usage:
   python3 inspect_commit_rw_trace.py kyber768 --records 20
@@ -29,6 +29,10 @@ def find_trace_file(path_or_benchmark: str) -> Path:
         return candidate
 
     trace_dir = trace_output_dir(path_or_benchmark)
+    l1d_matches = sorted(trace_dir.glob("*l1d_cache*commit_rw_trace.csv"))
+    if l1d_matches:
+        return l1d_matches[0]
+
     matches = sorted(trace_dir.glob("*commit_rw_trace.csv"))
     if matches:
         return matches[0]
@@ -61,7 +65,7 @@ def inspect_trace(trace_file: Path, max_records: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Inspect commit-stage RW CSV traces"
+        description="Inspect L1D RW CSV traces"
     )
     parser.add_argument("target", help="Benchmark name or trace file path")
     parser.add_argument(
