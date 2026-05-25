@@ -247,6 +247,7 @@ class HintBasedPrefetcher(QueuedPrefetcher):
     cxx_header = "mem/cache/prefetch/hint_based.hh"
     cxx_exports = [
         PyBindMethod("addEventProbeRetiredInsts"),
+        PyBindMethod("addEventProbeO3CommitInsts"),
         PyBindMethod("setCache"),
     ]
 
@@ -281,6 +282,11 @@ class HintBasedPrefetcher(QueuedPrefetcher):
         self.addEvent(
             HWPProbeEventRetiredInsts(self, simObj, "RetiredInstsPC")
         )
+
+    def listenFromProbeO3CommitInstructions(self, simObj):
+        if not isinstance(simObj, SimObject):
+            raise TypeError("argument must be of SimObject type")
+        self.addEvent(HWPProbeEventO3CommitInsts(self, simObj, "Commit"))
 
 
 class IndirectMemoryPrefetcher(QueuedPrefetcher):
@@ -794,6 +800,15 @@ class HWPProbeEventRetiredInsts(HWPProbeEvent):
         if self.obj:
             for name in self.names:
                 self.prefetcher.getCCObject().addEventProbeRetiredInsts(
+                    self.obj.getCCObject(), name
+                )
+
+
+class HWPProbeEventO3CommitInsts(HWPProbeEvent):
+    def register(self):
+        if self.obj:
+            for name in self.names:
+                self.prefetcher.getCCObject().addEventProbeO3CommitInsts(
                     self.obj.getCCObject(), name
                 )
 

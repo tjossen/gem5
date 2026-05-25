@@ -25,8 +25,8 @@ SimpleMemTrace::SimpleMemTrace(const SimpleMemTraceParams &params)
         "Could not open commit trace file %s", filename);
 
     traceStream
-        << "thread_id,instruction_pointer,access_type,"
-        << "memory_address,access_size,cache_hit\n";
+        << "thread_id,seq_num,instruction_pointer,access_type,"
+        << "memory_address,access_size\n";
 
     registerExitCallback([this]() { flushTraces(); });
 }
@@ -59,24 +59,21 @@ SimpleMemTrace::traceCommit(const DynInstPtr& dynInst)
         return;
     }
 
-    const char *access_type = dynInst->isLoad() ? "R" : "W";
-    const Addr pc = dynInst->pcState().instAddr();
-    const Addr addr = dynInst->physEffAddr;
-    const unsigned size = dynInst->effSize;
-
     traceStream
         << dynInst->threadNumber << ','
-        << "0x" << std::hex << pc << std::dec << ','
-        << access_type << ','
-        << "0x" << std::hex << addr << std::dec << ','
-        << size << ','
-        << (dynInst->isCacheHit() ? 1 : 0) << '\n';
+        << dynInst->seqNum << ','
+        << "0x" << std::hex << dynInst->pcState().instAddr() << std::dec
+        << ','
+        << (dynInst->isLoad() ? 'R' : 'W') << ','
+        << "0x" << std::hex << dynInst->physEffAddr << std::dec << ','
+        << dynInst->effSize << '\n';
 }
 
 void
 SimpleMemTrace::regProbeListeners()
 {
     typedef ProbeListenerArg<SimpleMemTrace, DynInstPtr> DynInstListener;
+
     connectListener<DynInstListener>
         (this, "Commit", &SimpleMemTrace::traceCommit);
 }

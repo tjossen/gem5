@@ -24,7 +24,7 @@ SimpleCacheTrace::SimpleCacheTrace(const SimpleCacheTraceParams &params)
         "Could not open cache trace file %s", filename);
 
     traceStream
-        << "thread_id,instruction_pointer,access_type,"
+        << "thread_id,seq_num,instruction_pointer,access_type,"
         << "memory_address,access_size,cache_hit\n";
 
     registerExitCallback([this]() { flushTraces(); });
@@ -61,7 +61,7 @@ SimpleCacheTrace::traceCacheAccess(
     }
 
     const RequestPtr req = pkt->req;
-    if (!req->hasPaddr() || !req->hasPC()) {
+    if (!req->hasPaddr() || !req->hasPC() || !req->hasInstSeqNum()) {
         return;
     }
 
@@ -78,6 +78,7 @@ SimpleCacheTrace::traceCacheAccess(
 
     traceStream
         << contextId << ','
+        << req->getReqInstSeqNum() << ','
         << "0x" << std::hex << req->getPC() << std::dec << ','
         << accessType << ','
         << "0x" << std::hex << req->getPaddr() << std::dec << ','

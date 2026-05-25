@@ -18,10 +18,12 @@ from generate_prefetch_hints import (
 
 TRACE_FIELDS = [
     "thread_id",
+    "seq_num",
     "instruction_pointer",
     "access_type",
     "memory_address",
     "access_size",
+    "l1d_access",
     "cache_hit",
 ]
 
@@ -34,13 +36,22 @@ def _write_trace(path, rows):
             writer.writerow(row)
 
 
-def _trace_row(pc, address, cache_hit="1", size="8", access_type="R"):
+def _trace_row(
+    pc,
+    address,
+    cache_hit="1",
+    size="8",
+    access_type="R",
+    l1d_access="1",
+):
     return {
         "thread_id": "0",
+        "seq_num": "0",
         "instruction_pointer": pc,
         "access_type": access_type,
         "memory_address": address,
         "access_size": size,
+        "l1d_access": l1d_access,
         "cache_hit": cache_hit,
     }
 
@@ -135,6 +146,52 @@ class GeneratePrefetchHintsTest(unittest.TestCase):
                 [
                     ["pc", "address", "size"],
                     ["0x2002", "0x2220", "8"],
+                ],
+            )
+
+    def test_l1d_bypass_rows_count_for_lookback_but_do_not_emit_hints(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            trace_path = temp_path / "commit_rw_trace.csv"
+            output_path = temp_path / "hints_trace2.csv"
+
+            _write_trace(
+                trace_path,
+                [
+                    _trace_row(
+                        "0x4000", "0xaaa0", cache_hit="", l1d_access="0"
+                    ),
+                    _trace_row("0x4001", "0xbbb0", cache_hit="1"),
+                    _trace_row("0x4002", "0xccc0", cache_hit="0"),
+                    _trace_row(
+                        "0x4003", "0xddd0", cache_hit="", l1d_access="0"
+                    ),
+                    _trace_row("0x4004", "0xeee0", cache_hit="0"),
+                ],
+            )
+
+            stats = generate_hints_from_trace(
+                trace_path=trace_path,
+                output_path=output_path,
+                trace_lookback=2,
+            )
+
+            self.assertEqual(stats.rows_read, 5)
+            self.assertEqual(stats.hints_written, 2)
+            self.assertEqual(stats.skipped_cache_hits, 1)
+            self.assertEqual(stats.skipped_missing_pc, 0)
+            self.assertEqual(stats.skipped_early_pc, 0)
+            self.assertEqual(stats.malformed_rows, 0)
+
+            with output_path.open("r", encoding="utf-8", newline="") as file:
+                rows = list(csv.reader(file))
+
+            self.assertEqual(
+                rows,
+                [
+                    ["pc", "address", "size"],
+                    ["0x4000", "0xccc0", "8"],
+                    ["0x4002", "0xeee0", "8"],
                 ],
             )
 

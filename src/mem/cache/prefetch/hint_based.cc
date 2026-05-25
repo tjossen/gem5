@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "base/logging.hh"
+#include "cpu/o3/dyn_inst.hh"
 #include "debug/HWPrefetch.hh"
 #include "mem/cache/base.hh"
 #include "params/HintBasedPrefetcher.hh"
@@ -204,6 +205,16 @@ HintBased::notifyRetiredInst(const Addr pc)
     scheduleCacheSend();
 }
 
+void
+HintBased::notifyO3CommitInst(const o3::DynInstPtr& dynInst)
+{
+    if (!dynInst || (!dynInst->isLoad() && !dynInst->isStore())) {
+        return;
+    }
+
+    notifyRetiredInst(dynInst->pcState().instAddr());
+}
+
 bool
 HintBased::shouldPrefetchHint()
 {
@@ -360,8 +371,22 @@ HintBased::PrefetchListenerPC::notify(const Addr& pc)
 }
 
 void
+HintBased::PrefetchListenerO3Commit::notify(const o3::DynInstPtr& dynInst)
+{
+    parent.notifyO3CommitInst(dynInst);
+}
+
+void
 HintBased::addEventProbeRetiredInsts(SimObject *obj, const char *name)
 {
     ProbeManager *pm = obj->getProbeManager();
     listenersPC.push_back(pm->connect<PrefetchListenerPC>(*this, name));
+}
+
+void
+HintBased::addEventProbeO3CommitInsts(SimObject *obj, const char *name)
+{
+    ProbeManager *pm = obj->getProbeManager();
+    listenersO3Commit.push_back(
+        pm->connect<PrefetchListenerO3Commit>(*this, name));
 }

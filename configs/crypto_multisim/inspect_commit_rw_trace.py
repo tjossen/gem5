@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Inspect L1D cache-access read/write CSV traces.
+Inspect joined committed-memory read/write CSV traces.
 
 Usage:
   python3 inspect_commit_rw_trace.py kyber768 --records 20
@@ -29,9 +29,19 @@ def find_trace_file(path_or_benchmark: str) -> Path:
         return candidate
 
     trace_dir = trace_output_dir(path_or_benchmark)
+    joined_trace = trace_dir / "commit_rw_trace.csv"
+    if joined_trace.exists():
+        return joined_trace
+
     l1d_matches = sorted(trace_dir.glob("*l1d_cache*commit_rw_trace.csv"))
     if l1d_matches:
         return l1d_matches[0]
+
+    cpu_matches = sorted(
+        trace_dir.glob("*processor*traceListener*commit_rw_trace.csv")
+    )
+    if cpu_matches:
+        return cpu_matches[0]
 
     matches = sorted(trace_dir.glob("*commit_rw_trace.csv"))
     if matches:
@@ -65,7 +75,7 @@ def inspect_trace(trace_file: Path, max_records: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Inspect L1D RW CSV traces"
+        description="Inspect joined commit RW CSV traces"
     )
     parser.add_argument("target", help="Benchmark name or trace file path")
     parser.add_argument(

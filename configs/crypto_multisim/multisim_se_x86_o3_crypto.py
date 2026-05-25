@@ -318,7 +318,7 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
                 prefetch_on_access=False,
             )
             prefetcher.registerCache(cache)
-            prefetcher.listenFromProbeRetiredInstructions(
+            prefetcher.listenFromProbeO3CommitInstructions(
                 cpu.get_simobject()
             )
             return prefetcher

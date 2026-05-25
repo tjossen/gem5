@@ -811,6 +811,83 @@ namespace gem5
             const Addr request_blockaddr = blockAddress(pkt->getAddr());
 
             /*
+             * --- Fill-path index learning ---
+             *
+             * The IMP paper (Section 3.2) states that IMP "snoops the
+             * access and miss stream of the cache" and reads index values
+             * from data returning to the core.  In gem5, PrefetchInfo.data
+             * is null for read misses (the data hasn't arrived yet at
+             * request time).  The fill path is where the data first becomes
+             * available after a miss.
+             *
+             * Per the paper (Section 3.2.2): "On a candidate index access
+             * (i.e., anything detected as a streaming access), [...] the
+             * IPD allocates an entry in the table and writes the index
+             * value, i.e., B[i], to the idx1 field."
+             *
+             * We implement this by checking each fill: if the filled
+             * address belongs to a recognised stream (index array B), we
+             * extract the index value from the packet data and feed it to
+             * the IPD and indirect table.
+             */
+            if (pkt->hasData() && pkt->getPtr<uint8_t>() != nullptr &&
+                    pkt->req && pkt->req->hasPC()) {
+                const Addr fill_pc = pkt->req->getPC();
+                const Addr fill_addr = pkt->req->getPaddr();
+
+                if (prefetch_table.getStreamDetector().inStreamTable(
+                            fill_pc, fill_addr)) {
+                    const unsigned int req_size = pkt->req->getSize();
+                    const int32_t blk_off = fill_addr - request_blockaddr;
+
+                    if (blk_off >= 0 &&
+                            (blk_off + req_size) <=
+                            static_cast<unsigned>(pkt->getSize())) {
+                        uint8_t* dp = pkt->getPtr<uint8_t>() + blk_off;
+                        std::optional<int64_t> index_value{};
+                        switch (req_size) {
+                            case sizeof(int8_t):
+                                index_value =
+                                    *reinterpret_cast<int8_t*>(dp);
+                                break;
+                            case sizeof(int16_t):
+                                index_value =
+                                    *reinterpret_cast<int16_t*>(dp);
+                                break;
+                            case sizeof(int32_t):
+                                index_value =
+                                    *reinterpret_cast<int32_t*>(dp);
+                                break;
+                            case sizeof(int64_t):
+                                index_value =
+                                    *reinterpret_cast<int64_t*>(dp);
+                                break;
+                        }
+
+                        if (index_value) {
+                            IMPv2Stats.ipd_updates++;
+                            DPRINTF(HWPrefetch,
+                                "IMPv2 index access: pc=%#x addr=%#x "
+                                "idx=%d size=%d (fill-path)\n",
+                                fill_pc, fill_addr, *index_value,
+                                req_size);
+                            DPRINTF(LightPrefetch,
+                                "IMPv2 index access: pc=%#x addr=%#x "
+                                "idx=%d size=%d (fill-path)\n",
+                                fill_pc, fill_addr, *index_value,
+                                req_size);
+
+                            ipd.setIndex(fill_pc, *index_value);
+                            prefetch_table.getIndirectTable().newIndex(
+                                    fill_pc, *index_value);
+                        }
+                    }
+                }
+            }
+
+            /*
+             * --- Deferred indirect prefetch issuing ---
+             *
              * Get the context metadata which triggered this prefetch. Also,
              * erase the consumed metadata from the map as we no longer need it
              */

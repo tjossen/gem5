@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "base/random.hh"
+#include "cpu/o3/dyn_inst_ptr.hh"
 #include "base/statistics.hh"
 #include "mem/cache/base.hh"
 #include "mem/cache/prefetch/queued.hh"
@@ -81,7 +82,23 @@ class HintBased : public Queued
         HintBased &parent;
     };
 
+    class PrefetchListenerO3Commit :
+        public ProbeListenerArgBase<o3::DynInstPtr>
+    {
+      public:
+        PrefetchListenerO3Commit(HintBased &_parent, std::string name)
+            : ProbeListenerArgBase(std::move(name)), parent(_parent)
+        {}
+
+        void notify(const o3::DynInstPtr& dynInst) override;
+
+      protected:
+        HintBased &parent;
+    };
+
     std::vector<ProbeListenerPtr<PrefetchListenerPC>> listenersPC;
+    std::vector<ProbeListenerPtr<PrefetchListenerO3Commit>>
+        listenersO3Commit;
 
     struct HintBasedStats : public statistics::Group
     {
@@ -106,6 +123,7 @@ class HintBased : public Queued
      */
     void loadHintsFromCSV(const std::string &filePath);
     void notifyRetiredInst(const Addr pc);
+    void notifyO3CommitInst(const o3::DynInstPtr& dynInst);
     bool shouldPrefetchHint();
     void queueHint(const Hint &hint, const size_t hintIndex);
     void queueHintSegment(const Hint &hint, const size_t hintIndex,
@@ -127,6 +145,7 @@ class HintBased : public Queued
     Tick nextPrefetchReadyTime() const override;
 
     void addEventProbeRetiredInsts(SimObject *obj, const char *name);
+    void addEventProbeO3CommitInsts(SimObject *obj, const char *name);
 
     void setCache(BaseCache *_cache)
     {

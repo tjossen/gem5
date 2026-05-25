@@ -86,6 +86,17 @@ def generate_hints_from_trace(
                 pc = int(row["instruction_pointer"], 0)
                 address = int(row["memory_address"], 0)
                 size = int(row["access_size"], 0)
+                l1d_access = int(row.get("l1d_access", "1") or "1", 0)
+            except (KeyError, TypeError, ValueError):
+                malformed_rows += 1
+                prior_pcs.append(None)
+                continue
+
+            if l1d_access == 0:
+                prior_pcs.append(pc)
+                continue
+
+            try:
                 cache_hit = int(row["cache_hit"], 0)
             except (KeyError, TypeError, ValueError):
                 malformed_rows += 1

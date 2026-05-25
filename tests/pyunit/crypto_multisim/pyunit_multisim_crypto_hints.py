@@ -17,6 +17,12 @@ GEM5_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_PATH = (
     GEM5_ROOT / "configs" / "crypto_multisim" / "multisim_se_x86_o3_crypto.py"
 )
+COMMIT_TRACE_CONFIG_PATH = (
+    GEM5_ROOT
+    / "configs"
+    / "crypto_multisim"
+    / "multisim_se_x86_o3_crypto_commit_trace.py"
+)
 
 
 def _install_module(name, module):
@@ -28,6 +34,9 @@ def _install_import_stubs():
     m5 = _install_module("m5", types.ModuleType("m5"))
     m5_objects = _install_module("m5.objects", types.ModuleType("m5.objects"))
     m5.objects = m5_objects
+    m5_util = _install_module("m5.util", types.ModuleType("m5.util"))
+    m5_util.addToPath = lambda *_args, **_kwargs: None
+    m5.util = m5_util
 
     for class_name in [
         "LTAGE",
@@ -43,6 +52,7 @@ def _install_import_stubs():
         "IndirectMemoryPrefetcher",
         "L2XBar",
         "SimpleCacheTrace",
+        "SimpleMemTrace",
         "STeMSPrefetcher",
         "StridePrefetcher",
         "SystemXBar",
@@ -169,7 +179,225 @@ def _load_config_module():
     return module
 
 
+def _load_commit_trace_module():
+    _install_import_stubs()
+    base = types.ModuleType("multisim_se_x86_o3_crypto")
+    base.PREFETCHER_LEVELS = ("l1i", "l1d", "l2", "l3")
+    base.L1D_CONFIG = {"size": "48KiB", "assoc": 12, "latency": 5}
+    base.L1I_CONFIG = {"size": "32KiB", "assoc": 8, "latency": 5}
+    base.L2_CONFIG = {"size": "1024KiB", "assoc": 16, "latency": 14}
+    base.L3_CONFIG = {"size": "32MiB", "assoc": 16, "latency": 40}
+    base.CACHE_LINE_SIZE = 64
+    base.CLOCK_FREQUENCY = "3GHz"
+    base.MEMORY_SIZE = "8GiB"
+    base.MAX_PARALLEL_SIMULATIONS = 15
+    base.ENABLED_BENCHMARKS = {"sha256": True}
+    base.BENCHMARK_PATH_CANDIDATES = {"sha256": ["/tmp/sha256"]}
+    base.BENCHMARK_ARGUMENTS = {"sha256": []}
+    base.created_cpu = SimpleNamespace()
+    base.created_hierarchies = []
+    base._create_x86_o3_cpu = lambda: base.created_cpu
+    base._resolve_binary_path = lambda candidates: Path(candidates[0])
+
+    class FakeHierarchy(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            base.created_hierarchies.append(self)
+
+    base.ThreeLevelClassicCacheHierarchy = FakeHierarchy
+    sys.modules["multisim_se_x86_o3_crypto"] = base
+
+    multisim_calls = []
+    sys.modules["gem5.utils.multisim"].set_num_processes = (
+        lambda value: multisim_calls.append(("set_num_processes", value))
+    )
+    sys.modules["gem5.utils.multisim"].add_simulator = (
+        lambda simulator: multisim_calls.append(("add_simulator", simulator))
+    )
+
+    module_name = "multisim_se_x86_o3_crypto_commit_trace_under_test"
+    spec = importlib.util.spec_from_file_location(
+        module_name, COMMIT_TRACE_CONFIG_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module, base, multisim_calls
+
+
 class CryptoMultisimHintGenerationTest(unittest.TestCase):
+    def test_commit_trace_config_uses_joined_cpu_and_l1d_trace_source(self):
+        config, base, _multisim_calls = _load_commit_trace_module()
+
+        class FakeObject(SimpleNamespace):
+            def __init__(self, *args, **kwargs):
+                super().__init__(args=args, **kwargs)
+
+        class FakeBoard(SimpleNamespace):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+
+            def set_se_binary_workload(self, **kwargs):
+                self.workload = kwargs
+
+        config.SimpleBoard = FakeBoard
+        config.BaseCPUProcessor = FakeObject
+        config.BaseCPUCore = FakeObject
+        config.SingleChannelDDR4_2400 = FakeObject
+        config.BinaryResource = FakeObject
+        config.Simulator = FakeObject
+
+        simulator = config.CryptoCommitTraceCaptureSimulator(
+            benchmark_name="sha256",
+            binary_path=Path("/tmp/sha256"),
+            arguments=[],
+        )
+
+        built = simulator._build_simulator()
+
+        self.assertIs(built.board.processor.cores[0].core, base.created_cpu)
+        self.assertEqual(
+            base.created_cpu.traceListener.traceFile,
+            "commit_rw_trace.csv",
+        )
+        self.assertEqual(
+            base.created_hierarchies[0].l1d_trace_file,
+            "commit_rw_trace.csv",
+        )
+
+    def test_commit_trace_run_registers_join_finalize_before_simulation(self):
+        config, _base, _multisim_calls = _load_commit_trace_module()
+        registered_callbacks = []
+
+        class FakeObject(SimpleNamespace):
+            def __init__(self, *args, **kwargs):
+                super().__init__(args=args, **kwargs)
+
+        class FakeBoard(SimpleNamespace):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+
+            def set_se_binary_workload(self, **kwargs):
+                self.workload = kwargs
+
+        class FakeSimulator(SimpleNamespace):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+
+            def run(self):
+                registered_callbacks.append(("simulator_run", None))
+
+        old_register = config.atexit.register
+        try:
+            config.atexit.register = (
+                lambda callback, path: registered_callbacks.append(
+                    (callback, path)
+                )
+            )
+            config.SimpleBoard = FakeBoard
+            config.BaseCPUProcessor = FakeObject
+            config.BaseCPUCore = FakeObject
+            config.SingleChannelDDR4_2400 = FakeObject
+            config.BinaryResource = FakeObject
+            config.Simulator = FakeSimulator
+
+            simulator = config.CryptoCommitTraceCaptureSimulator(
+                benchmark_name="sha256",
+                binary_path=Path("/tmp/sha256"),
+                arguments=[],
+            )
+            simulator.override_outdir(Path("/tmp/sha256_out"))
+
+            simulator.run()
+        finally:
+            config.atexit.register = old_register
+
+        self.assertEqual(
+            registered_callbacks,
+            [
+                (
+                    config._finalize_joined_trace_for_outdir,
+                    Path("/tmp/sha256_out"),
+                ),
+                ("simulator_run", None),
+            ],
+        )
+
+    def test_join_committed_and_l1d_traces_preserves_commit_order(self):
+        config, _base, _multisim_calls = _load_commit_trace_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            cpu_trace = temp_path / "cpu.csv"
+            l1d_trace = temp_path / "l1d.csv"
+            joined_trace = temp_path / "commit_rw_trace.csv"
+
+            cpu_trace.write_text(
+                "thread_id,seq_num,instruction_pointer,access_type,"
+                "memory_address,access_size\n"
+                "0,10,0x1000,R,0x10000,8\n"
+                "0,20,0x2000,R,0x20000,16\n"
+                "0,30,0x3000,W,0x30000,8\n"
+                "0,40,0x4000,R,0x40000,8\n",
+                encoding="utf-8",
+            )
+            l1d_trace.write_text(
+                "thread_id,seq_num,instruction_pointer,access_type,"
+                "memory_address,access_size,cache_hit\n"
+                "0,20,0x2000,R,0x20000,8,1\n"
+                "0,99,0x9900,R,0x99000,8,0\n"
+                "0,10,0x1000,R,0x10000,8,1\n"
+                "0,20,0x2000,R,0x20008,8,0\n",
+                encoding="utf-8",
+            )
+
+            stats = config._join_committed_and_l1d_traces(
+                cpu_trace, l1d_trace, joined_trace
+            )
+
+            self.assertEqual(stats.committed_rows, 4)
+            self.assertEqual(stats.joined_rows, 2)
+            self.assertEqual(stats.committed_without_l1d, 2)
+            self.assertEqual(stats.l1d_only_rows, 1)
+            self.assertEqual(
+                joined_trace.read_text(encoding="utf-8").splitlines(),
+                [
+                    "thread_id,seq_num,instruction_pointer,access_type,"
+                    "memory_address,access_size,l1d_access,cache_hit",
+                    "0,10,0x1000,R,0x10000,8,1,1",
+                    "0,20,0x2000,R,0x20000,16,1,0",
+                    "0,30,0x3000,W,0x30000,8,0,",
+                    "0,40,0x4000,R,0x40000,8,0,",
+                ],
+            )
+
+    def test_sort_trace_by_seq_num_preserves_header_and_miss_count(self):
+        config, _base, _multisim_calls = _load_commit_trace_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace_path = Path(temp_dir) / "commit_rw_trace.csv"
+            trace_path.write_text(
+                "thread_id,seq_num,instruction_pointer,access_type,"
+                "memory_address,access_size,cache_hit\n"
+                "0,30,0x3000,R,0x30000,8,0\n"
+                "0,10,0x1000,R,0x10000,8,1\n"
+                "0,20,0x2000,W,0x20000,8,0\n",
+                encoding="utf-8",
+            )
+
+            config._sort_trace_by_seq_num(trace_path)
+
+            self.assertEqual(
+                trace_path.read_text(encoding="utf-8").splitlines(),
+                [
+                    "thread_id,seq_num,instruction_pointer,access_type,"
+                    "memory_address,access_size,cache_hit",
+                    "0,10,0x1000,R,0x10000,8,1",
+                    "0,20,0x2000,W,0x20000,8,0",
+                    "0,30,0x3000,R,0x30000,8,0",
+                ],
+            )
+
     def test_l1d_trace_listener_attaches_when_trace_file_is_configured(self):
         config = _load_config_module()
 
@@ -249,6 +477,62 @@ class CryptoMultisimHintGenerationTest(unittest.TestCase):
             "commit_rw_trace.csv",
         )
 
+    def test_hint_prefetcher_listens_to_o3_commit_probe(self):
+        config = _load_config_module()
+        calls = []
+
+        class FakeHintPrefetcher(SimpleNamespace):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+
+            def registerCache(self, cache):
+                calls.append(("register_cache", cache))
+
+            def listenFromProbeO3CommitInstructions(self, cpu):
+                calls.append(("listen_o3_commit", cpu))
+
+        cache = SimpleNamespace(name="l1d")
+        cpu_simobject = SimpleNamespace(name="cpu")
+        cpu = SimpleNamespace(get_simobject=lambda: cpu_simobject)
+
+        class FakeXBar(SimpleNamespace):
+            def __init__(self, **_kwargs):
+                super().__init__(cpu_side_ports=object(), mem_side_ports=object())
+
+        class FakeBadAddr(SimpleNamespace):
+            def __init__(self):
+                super().__init__(pio=object())
+
+        config.HintBasedPrefetcher = FakeHintPrefetcher
+        config.SystemXBar = FakeXBar
+        config.BadAddr = FakeBadAddr
+        hierarchy = config.ThreeLevelClassicCacheHierarchy(
+            prefetcher_map={
+                **{level: None for level in config.PREFETCHER_LEVELS},
+                "l1d": "hint",
+            },
+            benchmark_name="sha256",
+            hint_lookback=3,
+            **{f"l1d_{key}": value for key, value in config.L1D_CONFIG.items()},
+            **{f"l1i_{key}": value for key, value in config.L1I_CONFIG.items()},
+            **{f"l2_{key}": value for key, value in config.L2_CONFIG.items()},
+            **{f"l3_{key}": value for key, value in config.L3_CONFIG.items()},
+        )
+
+        prefetcher = hierarchy._get_prefetcher("l1d", cache, cpu)
+
+        self.assertEqual(
+            prefetcher.hints_file,
+            str(config.default_hint_path("sha256", 3)),
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("register_cache", cache),
+                ("listen_o3_commit", cpu_simobject),
+            ],
+        )
+
     def test_generates_hints_for_each_configured_lookback(self):
         config = _load_config_module()
         generation_calls = []
@@ -293,8 +577,8 @@ class CryptoMultisimHintGenerationTest(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             config._generate_hint_files_for_benchmarks(["sha256"])
 
-        self.assertEqual(config.DEFAULT_HINT_LOOKBACK, 15)
-        self.assertEqual(config.DEFAULT_HINT_CSV_NAME, "hints_trace15.csv")
+        self.assertEqual(config.DEFAULT_HINT_LOOKBACK, 16)
+        self.assertEqual(config.DEFAULT_HINT_CSV_NAME, "hints_trace16.csv")
         self.assertEqual(
             generation_calls,
             [
