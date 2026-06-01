@@ -60,6 +60,8 @@ HintBased::HintBasedStats::HintBasedStats(statistics::Group *parent)
                "Number of hint request segments skipped by line-based filters"),
       ADD_STAT(hintsSkippedBySampling, statistics::units::Count::get(),
                "Number of matched hints skipped by random sampling"),
+      ADD_STAT(hintsPrefetchedAtStart, statistics::units::Count::get(),
+               "Number of hint rows processed by startup-all mode"),
       ADD_STAT(retiredPCsObserved, statistics::units::Count::get(),
                "Number of retired PCs observed by the hint prefetcher"),
       ADD_STAT(retiredPCsSkipped, statistics::units::Count::get(),
@@ -74,6 +76,8 @@ HintBased::HintBasedStats::HintBasedStats(statistics::Group *parent)
 HintBased::HintBased(const HintBasedPrefetcherParams &p)
   : Queued(p), hintsFilePath(p.hints_file),
     hintPrefetchPercentage(p.hint_prefetch_percentage),
+    prefetchAllHintsAtStart(p.prefetch_all_hints_at_start),
+    startupPrefetchEvent([this]{ queueAllHintsAtStart(); }, name()),
     rng(Random::genRandom(p.hint_sampling_seed)),
     statsHintBased(this)
 {
@@ -93,6 +97,14 @@ HintBased::~HintBased()
 {
     for (auto &entry : hintQueue) {
         delete entry.pkt;
+    }
+}
+
+void
+HintBased::startup()
+{
+    if (prefetchAllHintsAtStart && !startupPrefetchEvent.scheduled()) {
+        schedule(startupPrefetchEvent, curTick());
     }
 }
 
@@ -170,8 +182,46 @@ HintBased::loadHintsFromCSV(const std::string &filePath)
 }
 
 void
+HintBased::queueAllHintsAtStart()
+{
+    if (startupPrefetchQueued) {
+        return;
+    }
+    startupPrefetchQueued = true;
+    hintCursor = hints.size();
+
+    if (hints.empty()) {
+        inform("HintBased: startup-all mode enabled with no loaded hints\n");
+        return;
+    }
+
+    if (cache == nullptr) {
+        warn("HintBased: startup-all mode has no registered cache; "
+             "queued hints cannot schedule cache sends yet\n");
+    }
+
+    for (size_t hintIndex = 0; hintIndex < hints.size(); ++hintIndex) {
+        queueHint(hints[hintIndex], hintIndex);
+        statsHintBased.hintsPrefetchedAtStart++;
+    }
+
+    inform("HintBased: startup-all mode processed %llu hints, queued %llu "
+           "segments, dropped %llu queue-full segments, skipped %llu "
+           "redundant segments\n",
+           (unsigned long long)statsHintBased.hintsPrefetchedAtStart.value(),
+           (unsigned long long)statsHintBased.hintSegmentsQueued.value(),
+           (unsigned long long)statsHintBased.hintSegmentsDroppedQueueFull.value(),
+           (unsigned long long)statsHintBased.hintSegmentsSkippedRedundant.value());
+    scheduleCacheSend();
+}
+
+void
 HintBased::notifyRetiredInst(const Addr pc)
 {
+    if (prefetchAllHintsAtStart) {
+        return;
+    }
+
     statsHintBased.retiredPCsObserved++;
 
     if (hintCursor >= hints.size()) {

@@ -66,6 +66,9 @@ class HintBased : public Queued
 
     const std::string hintsFilePath;
     const unsigned hintPrefetchPercentage;
+    const bool prefetchAllHintsAtStart;
+    bool startupPrefetchQueued = false;
+    EventFunctionWrapper startupPrefetchEvent;
     Random::RandomPtr rng;
     BaseCache *cache = nullptr;
 
@@ -109,6 +112,7 @@ class HintBased : public Queued
         statistics::Scalar hintSegmentsDroppedQueueFull;
         statistics::Scalar hintSegmentsSkippedRedundant;
         statistics::Scalar hintsSkippedBySampling;
+        statistics::Scalar hintsPrefetchedAtStart;
         statistics::Scalar retiredPCsObserved;
         statistics::Scalar retiredPCsSkipped;
         statistics::Scalar hintsLoaded;
@@ -122,6 +126,7 @@ class HintBased : public Queued
      * @param filePath Path to the CSV hints file
      */
     void loadHintsFromCSV(const std::string &filePath);
+    void queueAllHintsAtStart();
     void notifyRetiredInst(const Addr pc);
     void notifyO3CommitInst(const o3::DynInstPtr& dynInst);
     bool shouldPrefetchHint();
@@ -135,6 +140,8 @@ class HintBased : public Queued
   public:
     HintBased(const HintBasedPrefetcherParams &p);
     ~HintBased();
+
+    void startup() override;
 
     void calculatePrefetch(const PrefetchInfo &pfi,
                            std::vector<AddrPriority> &addresses,

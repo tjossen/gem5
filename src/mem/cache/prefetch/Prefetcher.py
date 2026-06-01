@@ -260,6 +260,10 @@ class HintBasedPrefetcher(QueuedPrefetcher):
         1,
         "Random seed used when sampling matched hint rows",
     )
+    prefetch_all_hints_at_start = Param.Bool(
+        False,
+        "Queue every loaded hint at startup instead of waiting for PC matches",
+    )
     cache_snoop = True
 
     def __init__(self, **kwargs):

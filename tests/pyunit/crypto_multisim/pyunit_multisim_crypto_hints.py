@@ -525,12 +525,27 @@ class CryptoMultisimHintGenerationTest(unittest.TestCase):
             prefetcher.hints_file,
             str(config.default_hint_path("sha256", 3)),
         )
+        self.assertTrue(prefetcher.prefetch_all_hints_at_start)
         self.assertEqual(
             calls,
             [
                 ("register_cache", cache),
                 ("listen_o3_commit", cpu_simobject),
             ],
+        )
+
+    def test_startup_all_hint_mode_has_distinct_simulation_id(self):
+        config = _load_config_module()
+        prefetcher_map = {
+            **{level: None for level in config.PREFETCHER_LEVELS},
+            "l1d": "hint",
+        }
+
+        self.assertTrue(config.HINT_PREFETCH_ALL_AT_START)
+        self.assertEqual(
+            config._simulation_id("sha256", prefetcher_map, 3),
+            "crypto_sha256_trace3__l1i-none_l1d-hint_l2-none_l3-none"
+            "__hint-startup-all",
         )
 
     def test_generates_hints_for_each_configured_lookback(self):
@@ -780,8 +795,10 @@ class CryptoMultisimHintGenerationTest(unittest.TestCase):
             [simulator.get_id() for simulator in simulators],
             [
                 "crypto_sha256__l1i-none_l1d-none_l2-none_l3-none",
-                "crypto_sha256_trace1__l1i-none_l1d-none_l2-hint_l3-none",
-                "crypto_sha256_trace5__l1i-none_l1d-none_l2-hint_l3-none",
+                "crypto_sha256_trace1__l1i-none_l1d-none_l2-hint_l3-none"
+                "__hint-startup-all",
+                "crypto_sha256_trace5__l1i-none_l1d-none_l2-hint_l3-none"
+                "__hint-startup-all",
             ],
         )
 
@@ -795,7 +812,7 @@ class CryptoMultisimHintGenerationTest(unittest.TestCase):
                 "simulation_id,benchmark,l1i_prefetcher,l1d_prefetcher,"
                 "l2_prefetcher,l3_prefetcher,ipc,sim_seconds,sim_insts,"
                 "sim_cycles\n"
-                "crypto_sha256_trace1__l1i-none_l1d-none_l2-hint_l3-none,"
+                "crypto_sha256_trace1__l1i-none_l1d-none_l2-hint_l3-none__hint-startup-all,"
                 "sha256_trace1,none,none,hint,none,1.0,0.1,10,10\n",
                 encoding="utf-8",
             )
@@ -822,7 +839,8 @@ class CryptoMultisimHintGenerationTest(unittest.TestCase):
         self.assertEqual(
             [simulator.get_id() for simulator in simulators],
             [
-                "crypto_sha256_trace5__l1i-none_l1d-none_l2-hint_l3-none",
+                "crypto_sha256_trace5__l1i-none_l1d-none_l2-hint_l3-none"
+                "__hint-startup-all",
             ],
         )
 

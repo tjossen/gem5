@@ -171,6 +171,11 @@ HINT_GENERATION_PARALLELISM = min(
 DEFAULT_HINT_CSV_NAME = f"hints_trace{DEFAULT_HINT_LOOKBACK}.csv"
 HINT_GENERATION_LOCK_NAME = ".crypto_hints_trace_lookbacks.lock"
 
+# Congestion stress mode: load the hint file normally, but issue every hint
+# at simulation startup instead of waiting for committed-PC matches.
+HINT_PREFETCH_ALL_AT_START = False
+HINT_STARTUP_ALL_QUEUE_SIZE = 100_000
+
 
 def hint_csv_name(trace_lookback: int = DEFAULT_HINT_LOOKBACK) -> str:
     return f"hints_trace{trace_lookback}.csv"
@@ -310,13 +315,21 @@ class ThreeLevelClassicCacheHierarchy(AbstractClassicCacheHierarchy):
                 raise ValueError(
                     "HintBasedPrefetcher requires a cache and CPU probe source"
                 )
-            prefetcher = HintBasedPrefetcher(
-                hints_file=str(self._hint_file_path()),
-                on_inst=False,
-                on_write=False,
-                on_miss=False,
-                prefetch_on_access=False,
-            )
+            hint_prefetcher_kwargs = {
+                "hints_file": str(self._hint_file_path()),
+                "prefetch_all_hints_at_start": HINT_PREFETCH_ALL_AT_START,
+                "on_inst": False,
+                "on_write": False,
+                "on_miss": False,
+                "prefetch_on_access": False,
+            }
+            if HINT_PREFETCH_ALL_AT_START:
+                hint_prefetcher_kwargs.update(
+                    cache_snoop=False,
+                    queue_filter=False,
+                    queue_size=HINT_STARTUP_ALL_QUEUE_SIZE,
+                )
+            prefetcher = HintBasedPrefetcher(**hint_prefetcher_kwargs)
             prefetcher.registerCache(cache)
             prefetcher.listenFromProbeO3CommitInstructions(
                 cpu.get_simobject()
@@ -519,7 +532,7 @@ def _simulation_id(
     benchmark_label = _benchmark_label(
         benchmark_name, prefetcher_map, hint_lookback
     )
-    return (
+    simulation_id = (
         "crypto_"
         + benchmark_label
         + "__"
@@ -528,6 +541,9 @@ def _simulation_id(
             for level in PREFETCHER_LEVELS
         )
     )
+    if _prefetcher_map_has_hint(prefetcher_map) and HINT_PREFETCH_ALL_AT_START:
+        simulation_id += "__hint-startup-all"
+    return simulation_id
 
 
 def _make_prefetcher_map(
